@@ -1,0 +1,9 @@
+packages:
+  "framer-motion": "For smooth reveal animations and cyberpunk UI effects"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility to merge tailwind classes safely"
+
+images:
+  - path: "artifacts/scamsniff/public/images/cyber-bg.png"
+    description: "Dark moody abstract cyberpunk background with subtle glowing cyan and magenta geometric grid lines, very dark and minimal, vignetted edges"
+    aspect_ratio: "16:9"

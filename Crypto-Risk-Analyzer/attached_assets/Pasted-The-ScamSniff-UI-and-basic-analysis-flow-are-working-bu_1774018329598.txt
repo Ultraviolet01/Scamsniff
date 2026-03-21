@@ -1,0 +1,101 @@
+The ScamSniff UI and basic analysis flow are working, but the risk engine is too naive and produces misleading verdicts for legitimate projects.
+
+I want you to improve the backend analysis quality without changing the overall UI structure too much.
+
+Problems to fix:
+1. The app is over-triggering on keywords like “scam” or “rug pull” just because those words appear in search results, even when the project is legitimate.
+2. The score should not increase simply because a search query includes terms like scam, rug pull, exploit, or review.
+3. The engine needs better source evaluation and evidence weighting.
+4. Known legitimate projects with official docs, strong web presence, and credible sources should not be labeled “Caution” unless there is real negative evidence.
+
+Please refactor the analysis logic with this improved approach:
+
+A. Source classification
+For every result, classify it into one of these:
+- official
+- credible_third_party
+- user_generated
+- suspicious_or_low_quality
+- unknown
+
+Use domain and content clues.
+Examples:
+- official website, docs, github, company pages = official
+- major product sites, known publications, reputable directories = credible_third_party
+- reddit, X posts, random forums = user_generated
+- spammy blogs, low-quality sites, clickbait pages = suspicious_or_low_quality
+
+B. Evidence weighting
+Only increase risk significantly if:
+- multiple independent sources mention scams, exploits, phishing, rug pulls, impersonation, or fraud
+- there is negative evidence from credible_third_party or official sources
+- there is no official website/docs/github/team footprint after searching
+- the branding or website identity looks inconsistent
+- promises look unrealistic or pressure-driven
+
+Only decrease risk if:
+- official docs found
+- official website found
+- active github found
+- credible team or company footprint found
+- multiple credible sources support legitimacy
+
+C. Query hygiene
+Keep search queries like:
+- [input]
+- [input] official website
+- [input] docs
+- [input] github
+- [input] team
+- [input] review
+- [input] exploit
+- [input] scam
+But do NOT treat the presence of those query words in results as evidence by itself.
+
+D. Confidence logic
+Confidence should depend on:
+- number of relevant sources found
+- diversity of source types
+- whether official sources were found
+- whether evidence is conflicting
+
+E. Output improvements
+Return this improved JSON shape:
+{
+  "input": "",
+  "score": 0,
+  "verdict": "Low Risk | Caution | High Risk | Extreme Risk",
+  "confidence": "Low | Medium | High",
+  "summary": "",
+  "positive_signals": [],
+  "risk_signals": [],
+  "missing_signals": [],
+  "evidence": [
+    {
+      "title": "",
+      "url": "",
+      "source_type": "official | credible_third_party | user_generated | suspicious_or_low_quality | unknown",
+      "impact": "positive | negative | neutral",
+      "reason": ""
+    }
+  ]
+}
+
+F. UI changes
+Keep the existing design, but improve the results panel by:
+- adding “Missing Signals”
+- adding a short reason under each source explaining why it helped or hurt trust
+- making the summary more specific and less repetitive
+
+G. Testing
+After coding, test the analysis logic against:
+- Firecrawl
+- Coinbase
+- a suspicious random memecoin-style input
+- an unknown X handle
+- a fake-looking project URL
+
+Then explain:
+1. what was changed
+2. where the scoring became smarter
+3. how to tune the thresholds if verdicts are still too harsh

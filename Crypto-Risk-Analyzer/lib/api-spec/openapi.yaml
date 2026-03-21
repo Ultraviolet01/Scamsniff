@@ -1,0 +1,159 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: analyze
+    description: Crypto project risk analysis
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /analyze:
+    post:
+      operationId: analyzeProject
+      tags: [analyze]
+      summary: Analyze a crypto project for scam risk
+      description: Accepts a project name, URL, token, or X handle and returns a risk analysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzeRequest"
+      responses:
+        "200":
+          description: Analysis result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyzeResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    AnalyzeRequest:
+      type: object
+      properties:
+        input:
+          type: string
+          description: Project name, URL, token name, or X handle to analyze
+      required:
+        - input
+
+    EvidenceItem:
+      type: object
+      description: A single piece of evidence gathered from web search results
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+        source_type:
+          type: string
+          description: "Classification: official | credible_third_party | user_generated | suspicious_or_low_quality | unknown"
+        impact:
+          type: string
+          description: "Effect on trust: positive | negative | neutral"
+        reason:
+          type: string
+          description: Short explanation of why this source helped or hurt the trust score
+      required:
+        - title
+        - url
+        - source_type
+        - impact
+        - reason
+
+    AnalyzeResponse:
+      type: object
+      properties:
+        input:
+          type: string
+        input_type:
+          type: string
+          description: "Detected input type: project_name | website_url | x_handle | token_name | unknown"
+        score:
+          type: number
+          description: Risk score from 0 (safe) to 100 (extreme risk)
+        verdict:
+          type: string
+          description: "One of: Low Risk, Caution, High Risk, Extreme Risk"
+        confidence:
+          type: string
+          description: "One of: Low, Medium, High"
+        summary:
+          type: string
+        positive_signals:
+          type: array
+          items:
+            type: string
+        risk_signals:
+          type: array
+          items:
+            type: string
+        missing_signals:
+          type: array
+          description: Things we expected to find for a legitimate project but didn't
+          items:
+            type: string
+        evidence:
+          type: array
+          description: Classified and annotated sources used in the analysis
+          items:
+            $ref: "#/components/schemas/EvidenceItem"
+      required:
+        - input
+        - input_type
+        - score
+        - verdict
+        - confidence
+        - summary
+        - positive_signals
+        - risk_signals
+        - missing_signals
+        - evidence
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error

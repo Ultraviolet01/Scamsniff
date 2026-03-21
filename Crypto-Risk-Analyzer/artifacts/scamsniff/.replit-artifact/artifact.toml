@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "ScamSniff"
+version = "1.0.0"
+id = "artifacts/scamsniff"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25631
+
+[services.development]
+run = "pnpm --filter @workspace/scamsniff run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/scamsniff", "run", "build" ]
+publicDir = "artifacts/scamsniff/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25631"
+BASE_PATH = "/"
