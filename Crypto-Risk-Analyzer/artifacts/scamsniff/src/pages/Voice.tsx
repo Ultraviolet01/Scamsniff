@@ -1,7 +1,7 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { useConversation } from "@11labs/react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, MicOff, Activity, ArrowLeft, ShieldAlert, Volume2 } from "lucide-react";
+import { Mic, MicOff, Activity, ArrowLeft, ShieldAlert, Volume2, AlertTriangle } from "lucide-react";
 import { Link } from "wouter";
 import { analyzeProject } from "@workspace/api-client-react";
 import { cn } from "@/lib/utils";
@@ -13,16 +13,15 @@ import { cn } from "@/lib/utils";
 type Verdict = "Low Risk" | "Caution" | "High Risk" | "Extreme Risk";
 
 const VERDICT_COLOR: Record<Verdict, string> = {
-  "Low Risk":    "text-emerald-400",
-  "Caution":     "text-yellow-400",
-  "High Risk":   "text-orange-400",
-  "Extreme Risk":"text-red-500",
+  "Low Risk":     "text-emerald-400",
+  "Caution":      "text-yellow-400",
+  "High Risk":    "text-orange-400",
+  "Extreme Risk": "text-red-500",
 };
 
 /**
  * System prompt injected as a runtime override into every ElevenLabs session.
  * This keeps the authoritative prompt in code, not just the ElevenLabs dashboard.
- * The dashboard prompt acts as a fallback only.
  */
 const AGENT_SYSTEM_PROMPT = `\
 You are ScamSniff, a calm, sharp on-chain security analyst. Your job is to help users assess \
@@ -42,19 +41,13 @@ PHRASING RULES:
 "this looks suspicious based on the evidence available" / \
 "I couldn't verify enough trustworthy signals to feel confident either way".
 - Don't repeat the project or token name more than once per response.
-- Never verbally list more than 2 sources or signals — summarize them naturally \
-(e.g., "major crypto media and an audit report" not a bullet list).
+- Never verbally list more than 2 sources or signals — summarize them naturally.
 - Sound like a trusted security friend, not a compliance report.
 
 FOLLOW-UP HANDLING:
-- If the user asks "why?" → Explain the top 1-2 risk signals in plain, natural language. \
-One or two sentences max.
-- If the user asks "sources?" or "where did you get that?" → Describe the source types first \
-(e.g., "I found coverage in major crypto outlets and an audit firm report"). Offer more detail \
-only if they ask again.
-- If the user asks "how confident are you?" → Base your answer on evidence quality: \
-official sites, audits, or major media = high confidence; community posts or forums only = \
-low confidence, say so clearly. One sentence is enough.
+- If the user asks "why?" → Explain the top 1-2 risk signals in plain, natural language. One or two sentences max.
+- If the user asks "sources?" or "where did you get that?" → Describe the source types first. Offer more detail only if they ask again.
+- If the user asks "how confident are you?" → Base your answer on evidence quality. One sentence is enough.
 - For any other follow-up about the same target, answer directly without re-running the tool.
 
 TOOL USAGE:
@@ -65,13 +58,10 @@ data returned. Do NOT call the tool again for follow-up questions about the same
 DATA INTERPRETATION:
 The tool returns a structured data block. Use it as follows:
 - VERDICT + CONFIDENCE → craft your first sentence from these two together.
-- TOP_RISKS or TOP_TRUST → pick whichever set is most significant and weave the top 1-2 into \
-your evidence sentence(s). If both exist, lead with risks.
+- TOP_RISKS or TOP_TRUST → pick whichever set is most significant and weave the top 1-2 into your evidence sentence(s).
 - MISSING → use to inform your cautionary next step.
-- EVIDENCE_NOTE mentions limited data → qualify your answer: "based on limited public evidence" \
-or "I wasn't able to find much on this one".
-- EVIDENCE_NOTE mentions multiple credible sources → you can speak with more confidence, \
-but still use hedged language.
+- EVIDENCE_NOTE mentions limited data → qualify your answer: "based on limited public evidence".
+- EVIDENCE_NOTE mentions multiple credible sources → you can speak with more confidence, but still use hedged language.
 
 NEXT STEP BY VERDICT (keep to one crisp sentence):
 - Extreme Risk → "Don't connect your wallet or send funds — treat this as unverified."
@@ -81,13 +71,6 @@ NEXT STEP BY VERDICT (keep to one crisp sentence):
 
 TONE: Calm, focused, never panicked. Never hype. Acknowledge uncertainty when evidence is thin.`;
 
-/**
- * Format the /api/analyze response into a structured data packet for the agent LLM.
- *
- * Design: this is NOT a finished spoken sentence — it is a priority-ordered
- * data block the LLM uses to generate a natural 2-4 sentence spoken response.
- * The system prompt above instructs the LLM exactly how to interpret each field.
- */
 function formatForAgent(data: {
   verdict: string;
   score: number;
@@ -99,80 +82,102 @@ function formatForAgent(data: {
   summary: string;
 }): string {
   const lines: string[] = [];
-
-  // Priority 1: verdict + confidence — spoken first, always
   lines.push(`VERDICT: ${data.verdict}`);
   lines.push(`CONFIDENCE: ${data.confidence}`);
   lines.push(`INPUT_TYPE: ${data.input_type}`);
-
-  // Priority 2: top 2 strongest signals only — avoid over-listing
-  if (data.risk_signals.length > 0) {
+  if (data.risk_signals.length > 0)
     lines.push(`TOP_RISKS: ${data.risk_signals.slice(0, 2).join(" | ")}`);
-  }
-  if (data.positive_signals.length > 0) {
+  if (data.positive_signals.length > 0)
     lines.push(`TOP_TRUST: ${data.positive_signals.slice(0, 2).join(" | ")}`);
-  }
-
-  // Priority 3: missing signals (max 2) — informs the cautionary next step
-  if (data.missing_signals.length > 0) {
+  if (data.missing_signals.length > 0)
     lines.push(`MISSING: ${data.missing_signals.slice(0, 2).join(" | ")}`);
-  }
-
-  // Priority 4: evidence quality note — used for follow-up confidence questions
-  if (data.confidence === "Low") {
+  if (data.confidence === "Low")
     lines.push("EVIDENCE_NOTE: Limited public data found — qualify your response accordingly.");
-  } else if (data.confidence === "High") {
+  else if (data.confidence === "High")
     lines.push("EVIDENCE_NOTE: Multiple credible independent sources confirm this.");
-  } else {
+  else
     lines.push("EVIDENCE_NOTE: Mixed evidence — some credible sources, some community-only.");
-  }
-
-  // All signals available for follow-up questions if user asks for more detail
-  if (data.risk_signals.length > 2) {
+  if (data.risk_signals.length > 2)
     lines.push(`ALL_RISKS: ${data.risk_signals.join(" | ")}`);
-  }
-  if (data.positive_signals.length > 2) {
+  if (data.positive_signals.length > 2)
     lines.push(`ALL_TRUST: ${data.positive_signals.join(" | ")}`);
-  }
-
   return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
-// Main component
+// Types
 // ---------------------------------------------------------------------------
 
-type SessionStatus = "idle" | "connecting" | "active" | "error";
+/**
+ * Fine-grained voice state used for both UI and debug display.
+ *
+ * Lifecycle:
+ *   idle → requesting_permission → connecting → listening ↔ speaking → idle
+ *                                                          ↘ error
+ */
+type VoiceState =
+  | "idle"
+  | "requesting_permission"
+  | "connecting"
+  | "listening"
+  | "speaking"
+  | "error";
 
 interface AgentMessage {
   role: "agent" | "user";
   text: string;
 }
 
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
 export default function Voice() {
-  const [status, setStatus] = useState<SessionStatus>("idle");
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const lastAgentRef = useRef<string>("");
+
+  /**
+   * Refs that survive re-renders without causing extra renders themselves.
+   *
+   * micStreamRef   — keeps the getUserMedia stream alive for the duration of the session.
+   * sessionLiveRef — true once onConnect fires; used to guard onDisconnect so it
+   *                  does NOT reset state during the initial connection handshake,
+   *                  only after a real established session ends.
+   * stoppingRef    — true when the user manually triggers stopSession so we know
+   *                  the disconnect is intentional.
+   */
+  const micStreamRef    = useRef<MediaStream | null>(null);
+  const sessionLiveRef  = useRef(false);
+  const stoppingRef     = useRef(false);
+
+  const log = (msg: string, data?: unknown) => {
+    if (data !== undefined) {
+      console.log(`[ScamSniff Voice] ${msg}`, data);
+    } else {
+      console.log(`[ScamSniff Voice] ${msg}`);
+    }
+  };
+
+  const stopMicStream = () => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+      log("Mic stream stopped and released");
+    }
+  };
 
   const addMessage = useCallback((role: AgentMessage["role"], text: string) => {
-    setMessages((prev) => {
-      const next = [...prev, { role, text }];
-      return next.slice(-10);
-    });
-    if (role === "agent") lastAgentRef.current = text;
+    setMessages((prev) => [...prev, { role, text }].slice(-10));
   }, []);
 
   const conversation = useConversation({
     clientTools: {
-      /**
-       * ElevenLabs calls this whenever the agent decides to run a risk analysis.
-       * The agent passes { input: "<project/token/url/handle>" }.
-       * We call /api/analyze and return a formatted spoken summary.
-       */
       analyze_project_risk: async ({ input }: { input: string }): Promise<string> => {
+        log("Tool called: analyze_project_risk", { input });
         try {
           const result = await analyzeProject({ input });
+          log("Tool result received", { verdict: result.verdict });
           return formatForAgent({
             verdict: result.verdict,
             score: result.score,
@@ -183,88 +188,239 @@ export default function Voice() {
             input_type: result.input_type,
             summary: result.summary,
           });
-        } catch {
-          return "VERDICT: Unknown\nEVIDENCE_NOTE: Analysis failed — no results returned. Tell the user the service could not complete the lookup and suggest they try again.";
+        } catch (err) {
+          log("Tool error", err);
+          return "VERDICT: Unknown\nEVIDENCE_NOTE: Analysis failed — tell the user the service could not complete the lookup and suggest they try again.";
         }
       },
     },
+
     onConnect: () => {
-      setStatus("active");
+      log("onConnect fired — session is live");
+      sessionLiveRef.current = true;
+      stoppingRef.current = false;
+      setVoiceState("listening");
       setErrorMsg(null);
     },
+
     onDisconnect: () => {
-      setStatus("idle");
+      log("onDisconnect fired", {
+        sessionLive: sessionLiveRef.current,
+        stopping: stoppingRef.current,
+      });
+
+      // Only reset to idle if the session was actually established.
+      // Ignore spurious disconnects that fire during the initial handshake
+      // before onConnect has ever been called.
+      if (sessionLiveRef.current) {
+        sessionLiveRef.current = false;
+        stopMicStream();
+        setVoiceState("idle");
+      } else {
+        log("onDisconnect ignored — session was not yet live (handshake disconnect)");
+      }
     },
+
     onError: (err) => {
-      setStatus("error");
-      setErrorMsg(typeof err === "string" ? err : "Connection error. Check your API keys.");
+      const msg = typeof err === "string" ? err : (err as Error)?.message ?? "Connection error.";
+      log("onError fired", msg);
+      sessionLiveRef.current = false;
+      stopMicStream();
+      setVoiceState("error");
+      setErrorMsg(msg || "Could not connect to voice agent. Check your API keys.");
     },
-    onMessage: ({ message, source }) => {
-      if (source === "ai") addMessage("agent", message);
+
+    onMessage: ({ message, source }: { message: string; source: string }) => {
+      log("onMessage", { source, preview: message.slice(0, 60) });
+      // source is "ai" for agent messages and "user" for transcribed user speech
+      if (source === "ai" || source === "agent") addMessage("agent", message);
       if (source === "user") addMessage("user", message);
+
+      // Update speaking/listening visual state
+      if (source === "ai" || source === "agent") {
+        setVoiceState("speaking");
+      } else if (source === "user") {
+        setVoiceState("listening");
+      }
     },
   });
 
-  const isListening = conversation.isSpeaking === false && status === "active";
-  const isSpeaking = conversation.isSpeaking && status === "active";
+  // Keep speaking/listening in sync with the SDK's isSpeaking flag
+  useEffect(() => {
+    if (sessionLiveRef.current) {
+      setVoiceState(conversation.isSpeaking ? "speaking" : "listening");
+    }
+  }, [conversation.isSpeaking]);
+
+  // ---------------------------------------------------------------------------
+  // Session control
+  // ---------------------------------------------------------------------------
 
   const startSession = useCallback(async () => {
-    setStatus("connecting");
-    setMessages([]);
-    setErrorMsg(null);
-    try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Guard: don't double-start
+    if (voiceState !== "idle" && voiceState !== "error") {
+      log("startSession blocked — already in progress", voiceState);
+      return;
+    }
 
-      const res = await fetch(`${import.meta.env.BASE_URL}api/agent/signed-url`);
+    log("Mic button clicked — starting session");
+    setErrorMsg(null);
+    setMessages([]);
+    sessionLiveRef.current = false;
+    stoppingRef.current = false;
+
+    // ── Step 1: microphone permission ────────────────────────────────────────
+    setVoiceState("requesting_permission");
+    log("Requesting microphone permission via getUserMedia...");
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micStreamRef.current = stream;
+      log("Microphone permission granted", {
+        tracks: stream.getAudioTracks().map((t) => t.label),
+      });
+    } catch (err) {
+      const isDenied =
+        err instanceof DOMException &&
+        (err.name === "NotAllowedError" || err.name === "PermissionDeniedError");
+      const msg = isDenied
+        ? "Microphone access was denied. Please allow microphone access in your browser and try again."
+        : `Could not access microphone: ${err instanceof Error ? err.message : String(err)}`;
+      log("Microphone permission error", { err, isDenied });
+      setVoiceState("error");
+      setErrorMsg(msg);
+      return;
+    }
+
+    // ── Step 2: signed URL from backend ─────────────────────────────────────
+    setVoiceState("connecting");
+    log("Fetching signed URL from backend...");
+
+    let signedUrl: string;
+    try {
+      const res = await fetch("/api/agent/signed-url");
       if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(body.error ?? "Failed to get voice session.");
+        const body = await res.json().catch(() => ({ error: "Unknown server error" }));
+        throw new Error(body.error ?? `Server returned ${res.status}`);
       }
-      const { signed_url } = await res.json();
+      const data = await res.json();
+      signedUrl = data.signed_url;
+      log("Signed URL received (truncated)", signedUrl.slice(0, 60) + "...");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to get voice session token.";
+      log("Signed URL fetch failed", msg);
+      stopMicStream();
+      setVoiceState("error");
+      setErrorMsg(msg);
+      return;
+    }
+
+    // ── Step 3: start ElevenLabs session ────────────────────────────────────
+    log("Calling conversation.startSession...");
+    try {
       await conversation.startSession({
-        signedUrl: signed_url,
+        signedUrl,
         overrides: {
           agent: {
             prompt: { prompt: AGENT_SYSTEM_PROMPT },
           },
         },
       });
+      log("conversation.startSession resolved — waiting for onConnect");
+      // UI state is set to "listening" inside onConnect, not here,
+      // so there is no race between startSession and the connection handshake.
     } catch (err) {
-      setStatus("error");
-      setErrorMsg(err instanceof Error ? err.message : "Could not start voice session.");
+      const msg = err instanceof Error ? err.message : "Could not start voice session.";
+      log("conversation.startSession threw", msg);
+      stopMicStream();
+      sessionLiveRef.current = false;
+      setVoiceState("error");
+      setErrorMsg(msg);
     }
-  }, [conversation]);
+  }, [voiceState, conversation]);
 
   const stopSession = useCallback(async () => {
-    await conversation.endSession();
-    setStatus("idle");
+    log("Stop button clicked");
+    stoppingRef.current = true;
+    try {
+      await conversation.endSession();
+    } catch (err) {
+      log("endSession error (non-fatal)", err);
+    }
+    sessionLiveRef.current = false;
+    stopMicStream();
+    setVoiceState("idle");
   }, [conversation]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopMicStream();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Derived UI helpers
+  // ---------------------------------------------------------------------------
+
+  const isActive     = voiceState === "listening" || voiceState === "speaking";
+  const isConnecting = voiceState === "connecting" || voiceState === "requesting_permission";
+  const isError      = voiceState === "error";
+
+  const statusDot =
+    isActive     ? "bg-emerald-400 animate-pulse" :
+    isConnecting ? "bg-yellow-400 animate-pulse" :
+    isError      ? "bg-red-500" : "bg-border";
+
+  const statusLabel: Record<VoiceState, string> = {
+    idle:                 "STANDBY",
+    requesting_permission:"MIC CHECK",
+    connecting:           "CONNECTING",
+    listening:            "LISTENING",
+    speaking:             "SPEAKING",
+    error:                "ERROR",
+  };
+
+  const subtitleText: Record<VoiceState, string> = {
+    idle:                 'Say something like "Check SafeMoon" or "Is this site legit?"',
+    requesting_permission:"Requesting microphone access...",
+    connecting:           "Establishing secure voice channel...",
+    listening:            "Listening — speak naturally",
+    speaking:             "Agent is speaking...",
+    error:                "Voice session failed — see error below",
+  };
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
 
   return (
     <div className="min-h-screen w-full relative bg-background flex flex-col">
-      {/* Background tint */}
+      {/* Background gradient */}
       <div className="absolute inset-0 z-0 pointer-events-none">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/5 via-background to-background" />
       </div>
 
       {/* Top bar */}
       <header className="relative z-10 flex items-center justify-between px-6 py-4 border-b border-border/40">
-        <Link href="/" className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors font-mono text-sm">
+        <Link
+          href="/"
+          className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors font-mono text-sm"
+        >
           <ArrowLeft className="w-4 h-4" />
           Text Mode
         </Link>
+
         <div className="flex items-center gap-2 font-mono text-xs text-primary/70 tracking-widest">
           <ShieldAlert className="w-4 h-4" />
           SCAMSNIFF VOICE
         </div>
+
         <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
-          <span className={cn(
-            "w-1.5 h-1.5 rounded-full",
-            status === "active" ? "bg-emerald-400 animate-pulse" :
-            status === "connecting" ? "bg-yellow-400 animate-pulse" :
-            status === "error" ? "bg-red-500" : "bg-border"
-          )} />
-          {status === "active" ? "LIVE" : status === "connecting" ? "CONNECTING" : status === "error" ? "ERROR" : "STANDBY"}
+          <span className={cn("w-1.5 h-1.5 rounded-full", statusDot)} />
+          {statusLabel[voiceState]}
         </div>
       </header>
 
@@ -280,56 +436,69 @@ export default function Voice() {
             Voice Investigation
           </h1>
           <p className="font-mono text-sm text-muted-foreground max-w-sm">
-            {status === "idle"
-              ? 'Say something like "Check SafeMoon for me" or "Is this site legit?"'
-              : status === "connecting"
-              ? "Establishing secure voice channel..."
-              : isSpeaking
-              ? "Agent is speaking..."
-              : "Listening — speak naturally"}
+            {subtitleText[voiceState]}
           </p>
         </motion.div>
 
+        {/* ── Debug State Banner ── */}
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-border/30 bg-card/30 font-mono text-[10px] tracking-widest text-muted-foreground/60">
+          <span className={cn("w-1.5 h-1.5 rounded-full", statusDot)} />
+          STATE: {voiceState.toUpperCase()}
+          {errorMsg && (
+            <span className="text-red-400 ml-2 max-w-[200px] truncate">| {errorMsg}</span>
+          )}
+        </div>
+
         {/* Mic orb */}
         <div className="relative flex items-center justify-center">
-          {/* Pulse rings when active */}
-          {status === "active" && (
+          {/* Pulse rings */}
+          {isActive && (
             <>
               <span className="absolute w-40 h-40 rounded-full border border-primary/20 animate-ping" style={{ animationDuration: "2s" }} />
               <span className="absolute w-52 h-52 rounded-full border border-primary/10 animate-ping" style={{ animationDuration: "3s" }} />
             </>
           )}
+          {isConnecting && (
+            <span className="absolute w-40 h-40 rounded-full border border-yellow-400/20 animate-ping" style={{ animationDuration: "1.5s" }} />
+          )}
 
           <motion.button
-            whileHover={{ scale: status === "idle" ? 1.05 : 1 }}
+            type="button"
+            whileHover={{ scale: !isConnecting ? 1.05 : 1 }}
             whileTap={{ scale: 0.96 }}
-            onClick={status === "idle" ? startSession : stopSession}
-            disabled={status === "connecting"}
+            onClick={isActive ? stopSession : isConnecting ? undefined : startSession}
+            disabled={isConnecting}
+            aria-label={isActive ? "Stop voice session" : "Start voice session"}
             className={cn(
-              "relative w-32 h-32 rounded-full flex items-center justify-center transition-all duration-500 shadow-2xl border-2 focus:outline-none",
-              status === "idle"
-                ? "bg-primary/20 border-primary/50 hover:bg-primary/30 hover:border-primary"
-                : status === "connecting"
+              "relative w-32 h-32 rounded-full flex items-center justify-center transition-all duration-500 shadow-2xl border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+              voiceState === "idle"
+                ? "bg-primary/20 border-primary/50 hover:bg-primary/30 hover:border-primary cursor-pointer"
+                : isConnecting
                 ? "bg-yellow-500/20 border-yellow-500/50 cursor-wait"
-                : status === "active"
+                : voiceState === "listening"
                 ? "bg-primary/30 border-primary cursor-pointer"
-                : "bg-destructive/20 border-destructive/50"
+                : voiceState === "speaking"
+                ? "bg-accent/20 border-accent/60 cursor-pointer"
+                : voiceState === "error"
+                ? "bg-red-500/20 border-red-500/50 cursor-pointer"
+                : "bg-primary/20 border-primary/50 cursor-pointer"
             )}
           >
-            {status === "connecting" ? (
+            {/* Icon */}
+            {isConnecting ? (
               <Activity className="w-10 h-10 text-yellow-400 animate-spin" />
-            ) : status === "active" ? (
-              isSpeaking ? (
-                <Volume2 className="w-10 h-10 text-primary animate-pulse" />
-              ) : (
-                <Mic className={cn("w-10 h-10 text-primary", isListening && "animate-pulse")} />
-              )
+            ) : voiceState === "speaking" ? (
+              <Volume2 className="w-10 h-10 text-accent animate-pulse" />
+            ) : voiceState === "listening" ? (
+              <Mic className="w-10 h-10 text-primary animate-pulse" />
+            ) : voiceState === "error" ? (
+              <AlertTriangle className="w-10 h-10 text-red-400" />
             ) : (
               <Mic className="w-10 h-10 text-primary/70" />
             )}
 
-            {/* Listening waveform bars */}
-            {isListening && (
+            {/* Waveform bars (listening) */}
+            {voiceState === "listening" && (
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-0.5 items-end h-4">
                 {[...Array(5)].map((_, i) => (
                   <motion.span
@@ -344,24 +513,24 @@ export default function Voice() {
           </motion.button>
         </div>
 
-        {/* Action hint */}
-        <p className="font-mono text-xs text-muted-foreground/60 text-center">
-          {status === "idle"
-            ? "Tap to start voice session"
-            : status === "active"
-            ? "Tap to end session"
-            : null}
+        {/* Tap hint */}
+        <p className="font-mono text-xs text-muted-foreground/50 text-center">
+          {voiceState === "idle"  && "Tap to start voice session"}
+          {isActive              && "Tap to end session"}
+          {isConnecting          && "Please wait..."}
+          {voiceState === "error" && "Tap the mic to try again"}
         </p>
 
-        {/* Error */}
+        {/* Error card */}
         <AnimatePresence>
-          {status === "error" && errorMsg && (
+          {isError && errorMsg && (
             <motion.div
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
-              className="bg-destructive/10 border border-destructive/40 rounded-xl px-5 py-4 text-sm font-mono text-destructive max-w-sm text-center"
+              className="bg-red-500/10 border border-red-500/40 rounded-xl px-5 py-4 text-sm font-mono text-red-400 max-w-sm text-center leading-relaxed"
             >
+              <AlertTriangle className="w-4 h-4 mx-auto mb-2 opacity-70" />
               {errorMsg}
             </motion.div>
           )}
@@ -375,7 +544,7 @@ export default function Voice() {
               animate={{ opacity: 1, y: 0 }}
               className="w-full max-w-xl space-y-2"
             >
-              <p className="font-mono text-xs text-muted-foreground/50 tracking-widest uppercase mb-3">
+              <p className="font-mono text-xs text-muted-foreground/40 tracking-widest uppercase mb-3">
                 Transcript
               </p>
               {messages.map((m, i) => (
@@ -402,8 +571,7 @@ export default function Voice() {
 
       </main>
 
-      {/* Footer note */}
-      <footer className="relative z-10 text-center pb-6 font-mono text-[10px] text-muted-foreground/40">
+      <footer className="relative z-10 text-center pb-6 font-mono text-[10px] text-muted-foreground/30">
         Assessment based on available public web evidence · Not financial advice
       </footer>
     </div>

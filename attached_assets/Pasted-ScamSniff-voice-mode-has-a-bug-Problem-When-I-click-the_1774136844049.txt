@@ -1,0 +1,67 @@
+ScamSniff voice mode has a bug.
+
+Problem:
+When I click the microphone button, it immediately returns back instead of staying in listening mode. I cannot speak, and it does not seem to capture audio.
+
+Please debug and fix this as a high-priority voice session startup issue.
+
+What to investigate:
+1. Microphone permission flow
+- ensure microphone access is requested correctly using getUserMedia
+- if permission is denied, show a clear UI error instead of silently resetting
+- if permission is granted, keep the session alive and move into listening mode
+
+2. Voice session lifecycle
+- check whether the ElevenLabs / ElevenAgents conversation session is failing immediately after start
+- add logs for:
+  - mic button clicked
+  - requesting microphone permission
+  - microphone permission granted/denied
+  - conversation session starting
+  - conversation connected
+  - listening started
+  - error received
+  - session ended
+- prevent the UI from instantly resetting unless there is a real disconnect or error
+
+3. Component state bug
+- check whether the voice UI component is re-rendering or unmounting right after click
+- make sure isConnecting / isListening / isActive states are not being reset too early
+- ensure the microphone button does not trigger a form submit or page navigation
+
+4. Browser/audio handling
+- verify that audio stream is successfully created and attached
+- keep the stream open while listening
+- clean up only when the user manually ends the session or an actual fatal error occurs
+
+5. Error visibility
+- show a visible error message if startup fails, such as:
+  - Microphone permission denied
+  - Failed to start voice session
+  - Could not connect to voice agent
+- do not silently bounce back to the initial state
+
+6. Add fallback debug UI
+Temporarily show current voice state on screen:
+- idle
+- requesting_permission
+- connecting
+- listening
+- speaking
+- error
+Also show the latest error message if one exists.
+
+7. Final expected behavior
+When the user clicks the microphone button:
+- request microphone permission if needed
+- move to connecting
+- then move to listening
+- stay there long enough for the user to speak
+- only return to idle when the user closes it or a real error happens
+
+Please provide:
+- the exact code fix
+- where the bug was
+- what caused the instant reset
+- a safer voice state management approach
+- temporary console logs I can use to verify the flow
