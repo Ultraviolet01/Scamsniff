@@ -170,13 +170,13 @@ export default function Voice() {
         if (isQuota) {
           setVoiceState("error");
           setErrorMsg(
-            "ElevenLabs quota exceeded. Add credits at elevenlabs.io to continue."
+            "ElevenLabs character quota exhausted. Your free tier limit has been reached — upgrade or wait for the monthly reset at elevenlabs.io."
           );
         } else if (reason === "error" || reason === "") {
-          // Generic server-side error — session cut off unexpectedly
+          // Generic server-side termination — most commonly quota exhaustion
           setVoiceState("error");
           setErrorMsg(
-            "Voice session ended unexpectedly (server error). If this persists, your ElevenLabs quota may be exhausted — check elevenlabs.io."
+            "Voice session cut short by ElevenLabs. This usually means your monthly character quota is exhausted — check your usage at elevenlabs.io."
           );
         } else {
           setVoiceState("idle");
