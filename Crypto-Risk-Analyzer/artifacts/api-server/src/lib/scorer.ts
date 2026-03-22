@@ -80,6 +80,10 @@ const CREDIBLE_THIRD_PARTY_DOMAINS: string[] = [
   "sec.gov",
   "ftc.gov",
   "justice.gov",
+  "irs.gov",
+  "cftc.gov",
+  "fbi.gov",
+  "treasury.gov",
   "wikipedia.org",
   "investopedia.com",
   "metamask.io",
@@ -155,7 +159,11 @@ const RISK_SIGNAL_PATTERNS: SignalPattern[] = [
   { pattern: /\bget\s+rich\s+quick\b/i,   label: "Get-rich-quick language",                 baseWeight: 18 },
   { pattern: /\bdo\s+not\s+(invest|buy)\b/i, label: "Community warns against investing",    baseWeight: 14 },
   { pattern: /\bstay\s+away\b/i,           label: "Community tells users to avoid this",    baseWeight: 12 },
-  { pattern: /\bsentenced?\b/i,            label: "Criminal conviction or sentencing found", baseWeight: 30 },
+  { pattern: /\bsentenced?\b/i,            label: "Criminal conviction or sentencing found", baseWeight: 45 },
+  { pattern: /\bconvicted?\b/i,            label: "Criminal conviction or sentencing found", baseWeight: 45 },
+  { pattern: /\bfound\s+guilty\b/i,        label: "Criminal conviction or sentencing found", baseWeight: 45 },
+  { pattern: /\bindicted?\b/i,             label: "Criminal indictment found",                baseWeight: 35 },
+  { pattern: /\barrest(?:ed)?\b/i,         label: "Arrest reported",                          baseWeight: 25 },
 ];
 
 const POSITIVE_SIGNAL_PATTERNS: SignalPattern[] = [
@@ -564,11 +572,22 @@ export function scoreResults(
   const seenPositiveLabels = new Set<string>();
   const allEvidence: EvidenceItem[] = [];
   let rawScore = 0;
+  const credibleRiskLabels = new Set<string>();
 
   for (const result of results) {
     const { evidence, scoreDelta } = analyzeSource(result, input, seenRiskLabels, seenPositiveLabels);
     allEvidence.push(evidence);
     rawScore += scoreDelta;
+    // Track which risk labels came specifically from credible/official sources
+    if (
+      evidence.impact === "negative" &&
+      (evidence.source_type === "official" || evidence.source_type === "credible_third_party")
+    ) {
+      const text = `${result.title} ${result.description ?? ""}`;
+      for (const { pattern, label } of RISK_SIGNAL_PATTERNS) {
+        if (pattern.test(text)) credibleRiskLabels.add(label);
+      }
+    }
   }
 
   const footprint = detectLegitimacyFootprint(results);
@@ -635,6 +654,26 @@ export function scoreResults(
 
   if (strongOfficialFootprint && negativeCredibleCount === 0) {
     rawScore = Math.min(rawScore, 38);
+  }
+
+  // Score floors: government/law-enforcement findings cannot be cancelled by legitimacy bonuses.
+  const CONVICTION_LABELS = new Set([
+    "Criminal conviction or sentencing found",
+    "Criminal indictment found",
+  ]);
+  const hasCredibleConviction = [...credibleRiskLabels].some((l) => CONVICTION_LABELS.has(l));
+  const hasCredibleArrest =
+    credibleRiskLabels.has("Arrest reported") && negativeCredibleCount >= 1;
+
+  if (hasCredibleConviction) {
+    // Confirmed conviction from a credible/official source → always at least Extreme Risk (66+)
+    rawScore = Math.max(rawScore, 66);
+  } else if (hasCredibleArrest || negativeCredibleCount >= 3) {
+    // Multiple credible negatives or credible arrest → floor at High Risk (50+)
+    rawScore = Math.max(rawScore, 50);
+  } else if (negativeCredibleCount >= 2) {
+    // Two credible sources raising red flags → floor at upper Caution (41+)
+    rawScore = Math.max(rawScore, 41);
   }
 
   const communityNegativeCount = allEvidence.filter(
