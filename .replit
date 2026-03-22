@@ -75,5 +75,5 @@ externalPort = 3001
 
 [deployment]
 deploymentTarget = "autoscale"
-run = ["bash", "-c", "cd Crypto-Risk-Analyzer && PORT=3000 node artifacts/api-server/dist/index.cjs & PORT=5000 BASE_PATH=/ pnpm --filter @workspace/scamsniff run serve"]
-build = ["bash", "-c", "cd Crypto-Risk-Analyzer && pnpm install && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/scamsniff run build"]
+run = ["bash", "-c", "PORT=3000 node /home/runner/workspace/Crypto-Risk-Analyzer/artifacts/api-server/dist/index.cjs & PORT=5000 BASE_PATH=/ pnpm --dir /home/runner/workspace/Crypto-Risk-Analyzer --filter @workspace/scamsniff run serve"]
+build = ["bash", "-c", "pnpm --dir /home/runner/workspace/Crypto-Risk-Analyzer install && pnpm --dir /home/runner/workspace/Crypto-Risk-Analyzer --filter @workspace/api-server run build && pnpm --dir /home/runner/workspace/Crypto-Risk-Analyzer --filter @workspace/scamsniff run build"]
