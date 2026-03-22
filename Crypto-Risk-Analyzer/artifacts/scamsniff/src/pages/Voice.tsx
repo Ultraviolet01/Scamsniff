@@ -231,21 +231,28 @@ export default function Voice() {
           setVoiceState("listening");
           const lines = [
             `VERDICT: ${result.verdict}`,
+            `SCORE: ${result.score}/100`,
             `CONFIDENCE: ${result.confidence}`,
-            `INPUT_TYPE: ${result.input_type}`,
           ];
           if (result.risk_signals.length)
-            lines.push(`TOP_RISKS: ${result.risk_signals.slice(0, 2).join(" | ")}`);
+            lines.push(`MAIN_RISKS: ${result.risk_signals.slice(0, 2).join("; ")}`);
           if (result.positive_signals.length)
-            lines.push(`TOP_TRUST: ${result.positive_signals.slice(0, 2).join(" | ")}`);
+            lines.push(`MAIN_TRUST: ${result.positive_signals.slice(0, 2).join("; ")}`);
           if (result.missing_signals.length)
-            lines.push(`MISSING: ${result.missing_signals.slice(0, 2).join(" | ")}`);
+            lines.push(`KEY_GAPS: ${result.missing_signals.slice(0, 1).join("; ")}`);
           lines.push(
             result.confidence === "High"
-              ? "EVIDENCE_NOTE: Multiple credible independent sources confirm this."
+              ? "EVIDENCE_QUALITY: Multiple credible independent sources confirmed this."
               : result.confidence === "Low"
-              ? "EVIDENCE_NOTE: Limited public data — qualify your response accordingly."
-              : "EVIDENCE_NOTE: Mixed evidence — some credible, some community-only."
+              ? "EVIDENCE_QUALITY: Limited public data available — be explicit that the assessment is preliminary."
+              : "EVIDENCE_QUALITY: Some credible sources found, some community-only."
+          );
+          lines.push(
+            "RESPONSE_INSTRUCTIONS: Respond in 2 to 4 calm, natural sentences. " +
+            "State the verdict first. Then give the top 1-2 reasons. " +
+            "End with one practical next step for the user. " +
+            "Never be overconfident. If confidence is Low, acknowledge the evidence is limited. " +
+            "Do not list every signal — just the most important ones."
           );
           return lines.join("\n");
         } catch (err) {

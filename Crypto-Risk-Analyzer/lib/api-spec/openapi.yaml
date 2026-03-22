@@ -120,6 +120,9 @@ components:
           description: "One of: Low, Medium, High"
         summary:
           type: string
+        verdict_explanation:
+          type: string
+          description: "Short 1-2 sentence explanation of why this verdict was reached, acknowledging source quality mix"
         positive_signals:
           type: array
           items:
@@ -145,6 +148,7 @@ components:
         - verdict
         - confidence
         - summary
+        - verdict_explanation
         - positive_signals
         - risk_signals
         - missing_signals

@@ -1,11 +1,12 @@
 /**
- * Risk scoring engine for ScamSniff — v3.
+ * Risk scoring engine for ScamSniff — v4.
  *
  * Key design principles:
  * - Evidence must come from credible / official sources to carry significant weight.
  * - Query words ("scam", "rug pull") appearing in results do NOT by themselves raise score.
  * - Multiple independent corroborating sources are required before escalating verdict.
  * - Missing legitimacy signals contribute modestly, adjusted per input type.
+ * - Community-only risk signals are dampened and cannot overpower strong official trust signals.
  * - Confidence is derived from source diversity, not just result count.
  */
 import { SearchResult } from "./firecrawl";
@@ -40,6 +41,7 @@ export interface ScoreResult {
   risk_signals: string[];
   missing_signals: string[];
   summary: string;
+  verdict_explanation: string;
   evidence: EvidenceItem[];
 }
 
@@ -172,9 +174,9 @@ const POSITIVE_SIGNAL_PATTERNS: SignalPattern[] = [
 const RISK_MULTIPLIER: Record<SourceType, number> = {
   official:                   1.5,
   credible_third_party:       1.4,
-  user_generated:             0.4,
+  user_generated:             0.35,
   suspicious_or_low_quality:  0.1,
-  unknown:                    0.5,
+  unknown:                    0.4,
 };
 
 const POSITIVE_MULTIPLIER: Record<SourceType, number> = {
@@ -244,7 +246,7 @@ function buildMissingSignalRules(
         { condition: footprint.hasContactInfo,    label: "No contact or team information found",          riskDelta: 6 },
         { condition: footprint.hasGitHub,         label: "No GitHub or source code link found",           riskDelta: 5 },
         { condition: footprint.hasOfficialDocs,   label: "No official documentation found",               riskDelta: 5 },
-        { condition: footprint.hasCredibleMedia,  label: "No credible third-party coverage found",        riskDelta: 4 },
+        { condition: footprint.hasCredibleMedia,  label: "No broader third-party validation found",       riskDelta: 4 },
       ];
 
     case "token_name":
@@ -254,7 +256,7 @@ function buildMissingSignalRules(
         { condition: footprint.hasGitHub,         label: "No GitHub repository found",                    riskDelta: 6 },
         { condition: footprint.hasOfficialDocs,   label: "No official docs or whitepaper found",          riskDelta: 5 },
         { condition: footprint.hasOfficialSite,   label: "No identifiable official website",              riskDelta: 5 },
-        { condition: footprint.hasCredibleMedia,  label: "No credible media coverage found",              riskDelta: 4 },
+        { condition: footprint.hasCredibleMedia,  label: "No broader third-party validation found",       riskDelta: 4 },
       ];
   }
 }
@@ -280,10 +282,10 @@ function analyzeSource(
   for (const { pattern, label, baseWeight } of RISK_SIGNAL_PATTERNS) {
     if (pattern.test(text)) {
       scoreDelta += baseWeight * riskMultiplier;
-      if (!seenRiskLabels.has(label)) {
-        seenRiskLabels.add(label);
-        hitLabels.push(label.toLowerCase());
-      }
+      // Always record what this specific source found (for the reason label)
+      hitLabels.push(label.toLowerCase());
+      // Global deduplication only for the risk_signals list
+      seenRiskLabels.add(label);
       impact = "negative";
     }
   }
@@ -291,33 +293,48 @@ function analyzeSource(
   for (const { pattern, label, baseWeight } of POSITIVE_SIGNAL_PATTERNS) {
     if (pattern.test(text)) {
       scoreDelta += baseWeight * positiveMultiplier;
-      if (!seenPositiveLabels.has(label)) {
-        seenPositiveLabels.add(label);
-        hitLabels.push(label.toLowerCase());
-      }
+      hitLabels.push(label.toLowerCase());
+      seenPositiveLabels.add(label);
       if (impact !== "negative") impact = "positive";
     }
   }
 
-  const sourceBaseline: Record<SourceType, number> = {
-    official:                  -4,
-    credible_third_party:      -3,
-    user_generated:             0,
-    suspicious_or_low_quality:  3,
-    unknown:                    0,
-  };
-  scoreDelta += sourceBaseline[sourceType];
+  // Apply legitimacy baseline ONLY when the source is not flagging risk.
+  // A CoinDesk article reporting SafeMoon's fraud conviction should not get
+  // a -3 legitimacy discount just because it's from a credible domain.
+  if (impact !== "negative") {
+    const nonNegativeBaseline: Record<SourceType, number> = {
+      official:                  -4,
+      credible_third_party:      -3,
+      user_generated:             0,
+      suspicious_or_low_quality:  0,
+      unknown:                    0,
+    };
+    scoreDelta += nonNegativeBaseline[sourceType];
+  }
+  // Suspicious/low-quality sources always add a small risk premium
+  if (sourceType === "suspicious_or_low_quality") scoreDelta += 3;
   if (scoreDelta < -2 && impact === "neutral") impact = "positive";
 
+  // Build an explicit, human-readable reason label
   let reason: string;
   if (hitLabels.length > 0) {
-    reason = `Flags: ${hitLabels.slice(0, 3).join(" · ")}.`;
+    const labelList = hitLabels.slice(0, 2).join("; ");
+    if (sourceType === "user_generated") {
+      reason = `Community discussion mentions ${labelList}. Source credibility is limited — treat as a caution signal only.`;
+    } else if (sourceType === "official") {
+      reason = `Official source confirms: ${labelList}.`;
+    } else if (sourceType === "credible_third_party") {
+      reason = `Credible reporting confirms: ${labelList}.`;
+    } else {
+      reason = `Signals detected: ${labelList}.`;
+    }
   } else {
     const typeDescriptions: Record<SourceType, string> = {
-      official:                  "Official project resource — supports legitimacy.",
-      credible_third_party:      "Credible third-party source — no risk signals detected.",
-      user_generated:            "Community content — no strong signals detected.",
-      suspicious_or_low_quality: "Low-quality or spammy source — minimal weight applied.",
+      official:                  "Official documentation confirms project presence.",
+      credible_third_party:      "Credible third-party coverage found — no risk signals detected.",
+      user_generated:            "Community discussion found — no notable risk signals detected.",
+      suspicious_or_low_quality: "Low-quality or promotional source — minimal weight applied.",
       unknown:                   "Unclassified source — no strong signals detected.",
     };
     reason = typeDescriptions[sourceType];
@@ -341,7 +358,8 @@ function buildSummary(
   positiveSignals: string[],
   missingSignals: string[],
   evidence: EvidenceItem[],
-  resultCount: number
+  resultCount: number,
+  negativeCredibleCount: number
 ): string {
   if (resultCount === 0) {
     const subject = inputType === "x_handle" ? `the handle "${input}"` : `"${input}"`;
@@ -351,9 +369,14 @@ function buildSummary(
   const credibleCount = evidence.filter(
     (e) => e.source_type === "credible_third_party" || e.source_type === "official"
   ).length;
-  const negativeCredible = evidence.filter(
-    (e) => e.impact === "negative" && (e.source_type === "credible_third_party" || e.source_type === "official")
+
+  const communityNegativeCount = evidence.filter(
+    (e) => e.impact === "negative" && (e.source_type === "user_generated" || e.source_type === "unknown")
   ).length;
+
+  const hasStrongFootprint =
+    evidence.some((e) => e.source_type === "official") ||
+    evidence.some((e) => e.source_type === "credible_third_party");
 
   const parts: string[] = [];
 
@@ -365,23 +388,36 @@ function buildSummary(
       parts.push(`Key trust indicators: ${positiveSignals.slice(0, 3).join(", ")}.`);
     }
   } else if (verdict === "Caution") {
-    parts.push(`"${input}" has a partial legitimacy footprint — some positive signals exist, but gaps remain.`);
-    if (missingSignals.length > 0) {
+    if (hasStrongFootprint && negativeCredibleCount === 0 && communityNegativeCount > 0) {
+      parts.push(
+        `"${input}" has solid trust signals, but community sources also mention some concerns.`
+      );
+      parts.push(`Community signals have limited weight — ${credibleCount} credible source(s) found no serious issues.`);
+    } else if (missingSignals.length >= 2) {
+      parts.push(`"${input}" has a partial legitimacy footprint — some positive signals exist, but key markers are missing.`);
       parts.push(`Missing: ${missingSignals.slice(0, 2).join(", ")}.`);
-    }
-    if (riskSignals.length > 0) {
-      parts.push(`Minor concerns: ${riskSignals.slice(0, 2).join(", ")}.`);
+    } else {
+      parts.push(`"${input}" has a partial legitimacy footprint — some positive signals exist, but gaps remain.`);
+      if (riskSignals.length > 0) {
+        parts.push(`Minor concerns: ${riskSignals.slice(0, 2).join(", ")}.`);
+      }
     }
   } else if (verdict === "High Risk") {
-    parts.push(
-      `"${input}" has multiple risk indicators backed by ${negativeCredible} credible source(s).`
-    );
+    if (negativeCredibleCount > 0) {
+      parts.push(
+        `"${input}" has multiple risk indicators backed by ${negativeCredibleCount} credible source(s).`
+      );
+    } else {
+      parts.push(
+        `"${input}" has risk signals, primarily from community sources. No credible sources confirmed these concerns.`
+      );
+    }
     if (riskSignals.length > 0) {
       parts.push(`Concerns: ${riskSignals.slice(0, 3).join(", ")}.`);
     }
   } else {
     parts.push(
-      `"${input}" has strong evidence of fraud or malicious activity from ${negativeCredible} credible source(s).`
+      `"${input}" has strong evidence of fraud or malicious activity from ${negativeCredibleCount} credible source(s).`
     );
     if (riskSignals.length > 0) {
       parts.push(`Critical signals: ${riskSignals.slice(0, 3).join(", ")}.`);
@@ -390,6 +426,55 @@ function buildSummary(
 
   parts.push("Always do your own research (DYOR) before investing.");
   return parts.join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Verdict explanation builder
+// ---------------------------------------------------------------------------
+
+function buildVerdictExplanation(
+  verdict: ScoreResult["verdict"],
+  confidence: ScoreResult["confidence"],
+  negativeCredibleCount: number,
+  communityNegativeCount: number,
+  positiveSignals: string[],
+  missingSignals: string[],
+  evidence: EvidenceItem[]
+): string {
+  const hasOfficialPositive = evidence.some(
+    (e) => e.impact === "positive" && (e.source_type === "official" || e.source_type === "credible_third_party")
+  );
+
+  if (confidence === "Low") {
+    return "Limited public data was found, so this assessment should be treated cautiously. Verify through direct sources before drawing conclusions.";
+  }
+
+  if (verdict === "Low Risk") {
+    if (hasOfficialPositive) {
+      return "Strong official footprint confirmed across credible sources — confidence in this verdict is high.";
+    }
+    return "Available evidence is positive, but coverage is limited. Treat this as a preliminary signal, not a guarantee.";
+  }
+
+  if (verdict === "Caution") {
+    if (hasOfficialPositive && negativeCredibleCount === 0 && communityNegativeCount > 0) {
+      return "Strong official trust signals were found, but some community caution reports also exist. Community sources carry limited weight — no credible outlet confirmed these concerns.";
+    }
+    if (missingSignals.length >= 2) {
+      return "This project is missing several standard legitimacy markers. That alone does not confirm a scam, but it increases uncertainty.";
+    }
+    return "Evidence is mixed — some positive signals and some gaps exist. Assess each signal against its source quality before acting.";
+  }
+
+  if (verdict === "High Risk") {
+    if (negativeCredibleCount > 0) {
+      return `Risk indicators are backed by ${negativeCredibleCount} credible source(s). This warrants serious caution regardless of any positive signals.`;
+    }
+    return "Risk signals were detected, but primarily from community sources rather than official reporting. Treat this as a strong caution flag, not confirmed fraud.";
+  }
+
+  // Extreme Risk
+  return "Multiple credible sources confirm serious fraud or malicious activity. Do not engage with this project without thorough independent verification.";
 }
 
 // ---------------------------------------------------------------------------
@@ -419,14 +504,12 @@ function toConfidence(
     (e) => e.source_type === "user_generated" || e.source_type === "unknown"
   );
 
-  // X handles: if all evidence is community-only, cap at Medium
   if (inputType === "x_handle") {
     if (userGeneratedOnly) return "Low";
     if (credibleCount >= 2 && (footprint.hasOfficialSite || footprint.hasGitHub)) return "High";
     return "Medium";
   }
 
-  // Website: need the URL itself to classify as official or credible
   if (inputType === "website_url") {
     const hasOfficialPresence = footprint.hasOfficialSite || footprint.hasGitHub;
     if (credibleCount >= 2 && hasOfficialPresence) return "High";
@@ -434,7 +517,6 @@ function toConfidence(
     return "Low";
   }
 
-  // Token / project: standard rules
   const hasOfficialPresence = footprint.hasGitHub || footprint.hasOfficialDocs || footprint.hasOfficialSite;
   if (credibleCount >= 3 && hasOfficialPresence) return "High";
   if (credibleCount >= 1 || resultCount >= 8) return "Medium";
@@ -448,9 +530,9 @@ function toConfidence(
 function zeroResultResponse(input: string, inputType: InputType): ScoreResult {
   const missingByType: Record<InputType, string[]> = {
     x_handle:     ["No verified link to official project website", "No GitHub connection found", "No credible media coverage found"],
-    website_url:  ["No contact or team information found", "No GitHub or source code link found", "No credible third-party coverage found"],
-    token_name:   ["No official website or landing page", "No GitHub repository", "No documentation or whitepaper", "No coverage from credible media"],
-    project_name: ["No official website or landing page", "No GitHub repository", "No documentation or whitepaper", "No coverage from credible media"],
+    website_url:  ["No contact or team information found", "No GitHub or source code link found", "No broader third-party validation found"],
+    token_name:   ["No official website or landing page", "No GitHub repository", "No documentation or whitepaper", "No broader third-party validation found"],
+    project_name: ["No official website or landing page", "No GitHub repository", "No documentation or whitepaper", "No broader third-party validation found"],
     unknown:      ["No official website or landing page", "No GitHub repository", "No documentation or whitepaper"],
   };
 
@@ -462,6 +544,7 @@ function zeroResultResponse(input: string, inputType: InputType): ScoreResult {
     risk_signals: ["No web presence found"],
     missing_signals: missingByType[inputType],
     summary: `No web presence found for "${input}". This is itself a risk indicator — legitimate projects and accounts leave a verifiable footprint. Treat this as unverified and exercise caution.`,
+    verdict_explanation: "No public data was found for this input. The assessment defaults to Caution because the absence of any web presence is itself a risk signal for a crypto project.",
     evidence: [],
   };
 }
@@ -490,16 +573,22 @@ export function scoreResults(
 
   const footprint = detectLegitimacyFootprint(results);
 
+  // Credible media structural bonus only applies when at least some credible
+  // sources are not raising red flags (e.g. CoinDesk reporting SafeMoon fraud
+  // should not grant a legitimacy bonus).
+  const hasCredibleNonNegativeCoverage = allEvidence.some(
+    (e) => e.source_type === "credible_third_party" && e.impact !== "negative"
+  );
+
   // Structural bonuses
   const structuralAdjustments: { condition: boolean; delta: number; positive: string }[] = [
-    { condition: footprint.hasGitHub,        delta: -10, positive: "Active GitHub repository found" },
-    { condition: footprint.hasOfficialDocs,  delta: -8,  positive: "Official documentation found" },
-    { condition: footprint.hasCredibleMedia, delta: -8,  positive: "Coverage by credible media" },
-    { condition: footprint.hasBlockExplorer, delta: -5,  positive: "Verified on block explorer" },
-    { condition: footprint.hasSecurityAudit, delta: -10, positive: "Security audit evidence found" },
+    { condition: footprint.hasGitHub,              delta: -10, positive: "Active GitHub repository found" },
+    { condition: footprint.hasOfficialDocs,        delta: -8,  positive: "Official documentation found" },
+    { condition: hasCredibleNonNegativeCoverage,   delta: -8,  positive: "Coverage by credible media" },
+    { condition: footprint.hasBlockExplorer,       delta: -5,  positive: "Verified on block explorer" },
+    { condition: footprint.hasSecurityAudit,       delta: -10, positive: "Security audit evidence found" },
   ];
 
-  // For x_handle: bonus for Twitter/X presence from an official or credible source
   if (inputType === "x_handle" && footprint.hasTwitterXPresence) {
     structuralAdjustments.push({ condition: true, delta: -5, positive: "Active social media presence found" });
   }
@@ -524,13 +613,33 @@ export function scoreResults(
     }
   }
 
-  // Cap user-generated noise accumulation
+  // Dampen community-only negative accumulation
   const ugNegativeCount = allEvidence.filter(
     (e) => e.source_type === "user_generated" && e.impact === "negative"
   ).length;
-  if (ugNegativeCount > 3) {
-    rawScore = Math.min(rawScore, rawScore - (ugNegativeCount - 3) * 4);
+  if (ugNegativeCount > 2) {
+    // Each community negative post beyond the first 2 contributes at most 3 points
+    rawScore -= (ugNegativeCount - 2) * 5;
   }
+
+  // When a strong official footprint exists and NO credible sources are negative,
+  // community-only risk signals cannot push the verdict past "Caution" (score cap 38).
+  const negativeCredibleCount = allEvidence.filter(
+    (e) =>
+      e.impact === "negative" &&
+      (e.source_type === "official" || e.source_type === "credible_third_party")
+  ).length;
+
+  const strongOfficialFootprint =
+    (footprint.hasGitHub || footprint.hasOfficialDocs) && footprint.hasCredibleMedia;
+
+  if (strongOfficialFootprint && negativeCredibleCount === 0) {
+    rawScore = Math.min(rawScore, 38);
+  }
+
+  const communityNegativeCount = allEvidence.filter(
+    (e) => e.impact === "negative" && (e.source_type === "user_generated" || e.source_type === "unknown")
+  ).length;
 
   const score = Math.round(Math.max(0, Math.min(100, rawScore)));
   const verdict = toVerdict(score);
@@ -546,7 +655,23 @@ export function scoreResults(
     return typeOrder[a.source_type] - typeOrder[b.source_type];
   }).slice(0, 10);
 
-  const summary = buildSummary(input, inputType, verdict, riskSignals, positiveSignals, missingSignals, allEvidence, results.length);
+  const summary = buildSummary(
+    input, inputType, verdict, riskSignals, positiveSignals, missingSignals,
+    allEvidence, results.length, negativeCredibleCount
+  );
 
-  return { score, verdict, confidence, positive_signals: positiveSignals, risk_signals: riskSignals, missing_signals: missingSignals, summary, evidence: sortedEvidence };
+  const verdict_explanation = buildVerdictExplanation(
+    verdict, confidence, negativeCredibleCount, communityNegativeCount,
+    positiveSignals, missingSignals, allEvidence
+  );
+
+  return {
+    score, verdict, confidence,
+    positive_signals: positiveSignals,
+    risk_signals: riskSignals,
+    missing_signals: missingSignals,
+    summary,
+    verdict_explanation,
+    evidence: sortedEvidence,
+  };
 }

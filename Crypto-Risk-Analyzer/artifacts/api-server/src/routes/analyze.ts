@@ -106,6 +106,7 @@ router.post("/analyze", async (req, res): Promise<void> => {
     verdict: scoreData.verdict,
     confidence: scoreData.confidence,
     summary: scoreData.summary,
+    verdict_explanation: scoreData.verdict_explanation,
     positive_signals: scoreData.positive_signals,
     risk_signals: scoreData.risk_signals,
     missing_signals: scoreData.missing_signals,

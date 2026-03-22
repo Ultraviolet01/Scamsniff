@@ -177,8 +177,18 @@ function deriveWarningChips(
   if (missing.includes("github"))
     chips.push({ id: "no-github", label: "No GitHub", icon: <GitBranch className="w-3 h-3" />, severity: "medium" });
 
-  if (/scam|fraud|rug|ponzi|exit scam|phish|impersonat/.test(risks))
-    chips.push({ id: "scam", label: "Scam Mentions", icon: <AlertTriangle className="w-3 h-3" />, severity: "high" });
+  if (/scam|fraud|rug|ponzi|exit scam|phish|impersonat/.test(risks)) {
+    const hasCredibleNegative = evidence.some(
+      (e) =>
+        e.impact === "negative" &&
+        (e.source_type === "official" || e.source_type === "credible_third_party")
+    );
+    if (hasCredibleNegative) {
+      chips.push({ id: "scam", label: "Verified Risk Reports", icon: <AlertTriangle className="w-3 h-3" />, severity: "high" });
+    } else {
+      chips.push({ id: "scam", label: "Community Scam Claims", icon: <AlertTriangle className="w-3 h-3" />, severity: "low" });
+    }
+  }
 
   if (missingSignals.length >= 3)
     chips.push({ id: "weak", label: "Weak Footprint", icon: <ShieldOff className="w-3 h-3" />, severity: "medium" });
@@ -518,10 +528,15 @@ export default function Home() {
                         {results.verdict}
                       </h2>
                     </div>
-                    <p className="font-mono text-sm text-muted-foreground leading-relaxed mb-4 max-w-xl mx-auto md:mx-0">
+                    <p className="font-mono text-sm text-muted-foreground leading-relaxed mb-3 max-w-xl mx-auto md:mx-0">
                       {results.summary}
                     </p>
-                    <div className="flex flex-wrap justify-center md:justify-start gap-2">
+                    {results.verdict_explanation && (
+                      <p className="font-mono text-xs text-muted-foreground/60 italic leading-relaxed mb-4 max-w-xl mx-auto md:mx-0 border-l-2 border-primary/25 pl-3">
+                        {results.verdict_explanation}
+                      </p>
+                    )}
+                    <div className="flex flex-wrap justify-center md:justify-start gap-2 mb-2">
                       <span className="px-2.5 py-1 rounded-full bg-background/50 border border-border/40 text-muted-foreground font-mono text-[10px] tracking-widest">
                         CONFIDENCE: {results.confidence.toUpperCase()}
                       </span>
@@ -529,6 +544,9 @@ export default function Home() {
                         INPUT: {results.input}
                       </span>
                     </div>
+                    <p className="font-mono text-[10px] text-muted-foreground/30 text-center md:text-left">
+                      Assessment based on public web evidence. Always verify independently.
+                    </p>
                   </div>
                 </div>
 

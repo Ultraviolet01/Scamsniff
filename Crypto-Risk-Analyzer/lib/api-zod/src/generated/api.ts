@@ -40,6 +40,11 @@ export const AnalyzeProjectResponse = zod.object({
     .describe("One of: Low Risk, Caution, High Risk, Extreme Risk"),
   confidence: zod.string().describe("One of: Low, Medium, High"),
   summary: zod.string(),
+  verdict_explanation: zod
+    .string()
+    .describe(
+      "Short 1-2 sentence explanation of why this verdict was reached, acknowledging source quality mix",
+    ),
   positive_signals: zod.array(zod.string()),
   risk_signals: zod.array(zod.string()),
   missing_signals: zod
