@@ -6,12 +6,14 @@
  *   (because onConnect/onDisconnect/onError/onMessage were inline functions).
  *   When voiceState changed → re-render → new callbacks → useConversation
  *   detected config change → tore down and reset the session → onDisconnect
- *   fired 1.3 s after onConnect, resetting UI back to idle.
+ *   fired ~550 ms after onConnect, resetting UI back to idle.
  *
- * FIX:
- *   All callbacks are wrapped in stable useRef-based thunks so useConversation
- *   always receives the SAME function references across renders. Internal state
- *   is read via refs (voiceStateRef, etc.) to avoid stale closures.
+ * FIXES:
+ *   1. All callbacks wrapped in stable useRef-based thunks — useConversation
+ *      always receives the SAME function references across renders.
+ *   2. Prompt overrides removed from startSession — the agent already has the
+ *      correct system prompt set via ElevenLabs API; sending overrides caused
+ *      the server to reject the initialization message and drop the connection.
  */
 
 import {
@@ -30,11 +32,6 @@ import {
   ShieldAlert,
   Volume2,
   AlertTriangle,
-  CheckCircle2,
-  FlaskConical,
-  Radio,
-  Wifi,
-  WifiOff,
 } from "lucide-react";
 import { Link } from "wouter";
 import { analyzeProject } from "@workspace/api-client-react";
@@ -46,9 +43,7 @@ import { cn } from "@/lib/utils";
 
 type VS =
   | "idle"
-  | "mic_testing"
   | "requesting_permission"
-  | "mic_ready"
   | "connecting"
   | "listening"
   | "processing"
@@ -59,41 +54,6 @@ interface AgentMessage {
   role: "agent" | "user";
   text: string;
 }
-
-// ---------------------------------------------------------------------------
-// System prompt
-// ---------------------------------------------------------------------------
-
-const AGENT_SYSTEM_PROMPT = `\
-You are ScamSniff, a calm, sharp on-chain security analyst. Your job is to help users assess \
-whether a crypto project, token, URL, or X handle is suspicious.
-
-RESPONSE STRUCTURE — always follow this exact order:
-1. State the risk level immediately in the first sentence.
-2. Weave the top 1-2 strongest signals into the next 1-2 sentences naturally — do NOT list them.
-3. End with one clear, practical next step.
-
-RESPONSE LENGTH: 2 to 4 sentences maximum.
-
-PHRASING RULES:
-- Never say "this is safe" or "this is definitely a scam".
-- Use hedged language: "this looks low risk from the public evidence I found" or \
-"this looks suspicious based on the evidence available".
-- Don't repeat the project or token name more than once per response.
-- Sound like a trusted security friend, not a compliance report.
-
-TOOL USAGE:
-When the user mentions any project name, token, URL, or X handle — immediately call \
-analyze_project_risk with that identifier. Do NOT call the tool again for follow-up \
-questions about the same target.
-
-NEXT STEP BY VERDICT (one crisp sentence):
-- Extreme Risk → "Don't connect your wallet or send funds — treat this as unverified."
-- High Risk → "Cross-check the team, official site, and docs independently before doing anything."
-- Caution → "Verify the official site and GitHub yourself before taking any action."
-- Low Risk → "Looks clean from what I found, but verify links yourself before connecting a wallet."
-
-TONE: Calm, focused, never panicked. Never hype. Acknowledge uncertainty when evidence is thin.`;
 
 // ---------------------------------------------------------------------------
 // Stable callback hook
@@ -139,17 +99,11 @@ export default function Voice() {
   const [voiceState, setVoiceStateRaw] = useState<VS>("idle");
   const [messages, setMessages]        = useState<AgentMessage[]>([]);
   const [errorMsg, setErrorMsg]        = useState<string | null>(null);
-  const [bypassMode, setBypassMode]    = useState(false);
-  const [micTestResult, setMicTestResult] = useState<string | null>(null);
 
   // ── Refs (survive renders, readable inside stable callbacks) ──────────────
-  const voiceStateRef:  MutableRefObject<VS>              = useRef("idle");
+  const voiceStateRef:  MutableRefObject<VS>                 = useRef("idle");
   const micStreamRef:   MutableRefObject<MediaStream | null> = useRef(null);
-  const bypassRef:      MutableRefObject<boolean>         = useRef(false);
-  const sessionLiveRef: MutableRefObject<boolean>         = useRef(false);
-
-  // Keep bypassRef in sync with bypassMode state
-  useEffect(() => { bypassRef.current = bypassMode; }, [bypassMode]);
+  const sessionLiveRef: MutableRefObject<boolean>            = useRef(false);
 
   // Wrapped setter so the ref stays in sync too
   const setVoiceState = useCallback((s: VS) => {
@@ -159,8 +113,8 @@ export default function Voice() {
   }, []);
 
   // ── Environment diagnostics (computed once on mount) ──────────────────────
-  const isSecureContext    = window.isSecureContext;
-  const hasMediaDevices    = !!navigator.mediaDevices?.getUserMedia;
+  const isSecureContext = window.isSecureContext;
+  const hasMediaDevices = !!navigator.mediaDevices?.getUserMedia;
 
   // ── Mic stream helpers ────────────────────────────────────────────────────
   const stopMicStream = useCallback(() => {
@@ -182,29 +136,22 @@ export default function Voice() {
     log("onConnect fired — session established");
     sessionLiveRef.current = true;
     setErrorMsg(null);
-    if (!bypassRef.current) {
-      setVoiceState("listening");
-    }
+    setVoiceState("listening");
   });
 
   const onDisconnect = useStableCallback((event?: unknown) => {
-    // Log the full close event so we can see code + reason from ElevenLabs
     const ev = event as { code?: number; reason?: string; wasClean?: boolean } | undefined;
     log("onDisconnect fired", {
       sessionLive: sessionLiveRef.current,
       voiceState: voiceStateRef.current,
-      bypass: bypassRef.current,
       closeCode: ev?.code,
       closeReason: ev?.reason || "(no reason)",
       wasClean: ev?.wasClean,
     });
 
-    // Only reset if the session was genuinely alive (not a handshake artifact)
     if (sessionLiveRef.current) {
       sessionLiveRef.current = false;
       stopMicStream();
-
-      // If we're in a terminal/successful state or bypass, don't auto-reset
       if (
         voiceStateRef.current !== "idle" &&
         voiceStateRef.current !== "error"
@@ -312,64 +259,9 @@ export default function Voice() {
   // Actions
   // ---------------------------------------------------------------------------
 
-  /** Standalone mic test — completely independent of ElevenLabs */
-  const handleMicTest = useCallback(async () => {
-    log("TEST MIC button clicked");
-    setVoiceState("mic_testing");
-    setMicTestResult(null);
-    setErrorMsg(null);
-
-    log("Checking secure context...", { isSecureContext, hasMediaDevices });
-
-    if (!isSecureContext) {
-      setVoiceState("error");
-      setErrorMsg("Insecure context — microphone requires HTTPS or localhost.");
-      setMicTestResult("FAILED: insecure context");
-      return;
-    }
-    if (!hasMediaDevices) {
-      setVoiceState("error");
-      setErrorMsg("navigator.mediaDevices is not available in this browser.");
-      setMicTestResult("FAILED: mediaDevices unavailable");
-      return;
-    }
-
-    log("Calling getUserMedia...");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      const tracks = stream.getAudioTracks();
-      log("getUserMedia SUCCESS", { tracks: tracks.map((t) => t.label) });
-      micStreamRef.current = stream;
-      setMicTestResult(`GRANTED — track: ${tracks[0]?.label ?? "unknown"}`);
-      setVoiceState("mic_ready");
-
-      // Keep stream alive for 10 seconds, then release
-      setTimeout(() => {
-        log("Mic test: releasing stream after 10 s");
-        stopMicStream();
-        if (voiceStateRef.current === "mic_ready") {
-          setVoiceState("idle");
-          setMicTestResult((prev) => (prev ? prev + " (released)" : null));
-        }
-      }, 10_000);
-    } catch (err) {
-      const errObj = err as DOMException;
-      const isDenied = errObj.name === "NotAllowedError" || errObj.name === "PermissionDeniedError";
-      const msg = isDenied
-        ? `Permission denied (${errObj.name}). Allow microphone in your browser settings.`
-        : `getUserMedia failed: ${errObj.name} — ${errObj.message}`;
-      log("getUserMedia FAILED", { name: errObj.name, message: errObj.message });
-      console.error("[ScamSniff Voice] Full getUserMedia error:", err);
-      setMicTestResult(`FAILED: ${errObj.name}`);
-      setVoiceState("error");
-      setErrorMsg(msg);
-    }
-  }, [isSecureContext, hasMediaDevices, setVoiceState, stopMicStream]);
-
-  /** Full voice session start */
   const handleStartSession = useCallback(async () => {
     const cur = voiceStateRef.current;
-    if (cur !== "idle" && cur !== "error" && cur !== "mic_ready") {
+    if (cur !== "idle" && cur !== "error") {
       log("startSession blocked — already running", cur);
       return;
     }
@@ -379,47 +271,36 @@ export default function Voice() {
     setMessages([]);
     sessionLiveRef.current = false;
 
-    // Step 1: mic permission (unless already have a stream from mic test)
-    if (!micStreamRef.current) {
-      setVoiceState("requesting_permission");
-      log("Checking secure context...", { isSecureContext, hasMediaDevices });
+    // Step 1: request mic permission
+    setVoiceState("requesting_permission");
+    log("Checking secure context...", { isSecureContext, hasMediaDevices });
 
-      if (!isSecureContext) {
-        setVoiceState("error");
-        setErrorMsg("Microphone requires a secure context (HTTPS or localhost).");
-        return;
-      }
-      if (!hasMediaDevices) {
-        setVoiceState("error");
-        setErrorMsg("navigator.mediaDevices is not available in this browser.");
-        return;
-      }
-
-      log("Calling getUserMedia...");
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        micStreamRef.current = stream;
-        log("getUserMedia granted", { tracks: stream.getAudioTracks().map((t) => t.label) });
-      } catch (err) {
-        const errObj = err as DOMException;
-        const isDenied = errObj.name === "NotAllowedError" || errObj.name === "PermissionDeniedError";
-        const msg = isDenied
-          ? `Microphone access was denied. Allow microphone in your browser settings and try again.`
-          : `Could not access microphone: ${errObj.name} — ${errObj.message}`;
-        log("getUserMedia FAILED", err);
-        console.error("[ScamSniff Voice] Full getUserMedia error:", err);
-        setVoiceState("error");
-        setErrorMsg(msg);
-        return;
-      }
-    } else {
-      log("Reusing existing mic stream from mic test");
+    if (!isSecureContext) {
+      setVoiceState("error");
+      setErrorMsg("Microphone requires a secure context (HTTPS or localhost).");
+      return;
+    }
+    if (!hasMediaDevices) {
+      setVoiceState("error");
+      setErrorMsg("navigator.mediaDevices is not available in this browser.");
+      return;
     }
 
-    // Bypass mode: stay in listening without connecting to ElevenLabs
-    if (bypassRef.current) {
-      log("BYPASS MODE: skipping ElevenLabs connection, going straight to listening");
-      setVoiceState("listening");
+    log("Calling getUserMedia...");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micStreamRef.current = stream;
+      log("getUserMedia granted", { tracks: stream.getAudioTracks().map((t) => t.label) });
+    } catch (err) {
+      const errObj = err as DOMException;
+      const isDenied = errObj.name === "NotAllowedError" || errObj.name === "PermissionDeniedError";
+      const msg = isDenied
+        ? "Microphone access was denied. Allow microphone in your browser settings and try again."
+        : `Could not access microphone: ${errObj.name} — ${errObj.message}`;
+      log("getUserMedia FAILED", err);
+      console.error("[ScamSniff Voice] Full getUserMedia error:", err);
+      setVoiceState("error");
+      setErrorMsg(msg);
       return;
     }
 
@@ -446,11 +327,8 @@ export default function Voice() {
       return;
     }
 
-    // Step 3: start ElevenLabs session
-    // NOTE: No prompt overrides — the agent already has the correct system prompt
-    // configured via the ElevenLabs API. Sending overrides was previously causing
-    // the server to reject the initialization message and drop the connection.
-    log("Calling conversation.startSession (no overrides)...");
+    // Step 3: start ElevenLabs session (no overrides — agent prompt is set via API)
+    log("Calling conversation.startSession...");
     try {
       await conversation.startSession({ signedUrl });
       log("conversation.startSession resolved (onConnect will set listening state)");
@@ -482,14 +360,12 @@ export default function Voice() {
   // ---------------------------------------------------------------------------
 
   const isActive     = voiceState === "listening" || voiceState === "speaking" || voiceState === "processing";
-  const isConnecting = voiceState === "connecting" || voiceState === "requesting_permission" || voiceState === "mic_testing";
+  const isConnecting = voiceState === "connecting" || voiceState === "requesting_permission";
   const isError      = voiceState === "error";
 
   const STATE_LABEL: Record<VS, string> = {
     idle:                 "STANDBY",
-    mic_testing:          "MIC TEST",
     requesting_permission:"MIC CHECK",
-    mic_ready:            "MIC READY",
     connecting:           "CONNECTING",
     listening:            "LISTENING",
     processing:           "PROCESSING",
@@ -498,22 +374,19 @@ export default function Voice() {
   };
 
   const SUBTITLE: Record<VS, string> = {
-    idle:                 'Tap "Start Voice" to begin, or test your mic first.',
-    mic_testing:          "Testing microphone access...",
+    idle:                 'Tap "Start Voice" to begin.',
     requesting_permission:"Requesting microphone permission...",
-    mic_ready:            "Microphone ready — tap Start Voice to connect.",
     connecting:           "Establishing secure voice channel...",
     listening:            "Listening — speak naturally.",
     processing:           "Analysing...",
     speaking:             "Agent is speaking...",
-    error:                "Something went wrong — see debug panel below.",
+    error:                "Something went wrong — see details below.",
   };
 
   const dotColor =
     isActive     ? "bg-emerald-400 animate-pulse" :
     isConnecting ? "bg-yellow-400 animate-pulse" :
     isError      ? "bg-red-500" :
-    voiceState === "mic_ready" ? "bg-emerald-400" :
     "bg-border";
 
   // ---------------------------------------------------------------------------
@@ -575,7 +448,6 @@ export default function Voice() {
               isActive     ? "bg-primary/30 border-primary" :
               isConnecting ? "bg-yellow-500/20 border-yellow-500/50" :
               isError      ? "bg-red-500/20 border-red-500/40" :
-              voiceState === "mic_ready" ? "bg-emerald-500/20 border-emerald-500/40" :
               "bg-primary/15 border-primary/40"
             )}
           >
@@ -585,8 +457,6 @@ export default function Voice() {
               <Volume2 className="w-9 h-9 text-primary animate-pulse" />
             ) : voiceState === "processing" ? (
               <Activity className="w-9 h-9 text-primary animate-spin" />
-            ) : voiceState === "mic_ready" ? (
-              <CheckCircle2 className="w-9 h-9 text-emerald-400" />
             ) : isError ? (
               <AlertTriangle className="w-9 h-9 text-red-400" />
             ) : voiceState === "listening" ? (
@@ -612,40 +482,6 @@ export default function Voice() {
 
         {/* ── Control Buttons ── */}
         <div className="flex flex-wrap items-center justify-center gap-3">
-          {/* Mic test */}
-          {(voiceState === "idle" || voiceState === "error" || voiceState === "mic_ready") && (
-            <button
-              type="button"
-              onClick={handleMicTest}
-              disabled={isConnecting}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border/50 bg-card/40 font-mono text-xs text-muted-foreground hover:text-foreground hover:border-border transition-all disabled:opacity-40"
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              Test Microphone
-            </button>
-          )}
-
-          {/* Bypass toggle */}
-          {(voiceState === "idle" || voiceState === "error" || voiceState === "mic_ready") && (
-            <button
-              type="button"
-              onClick={() => {
-                setBypassMode((v) => !v);
-                log("Bypass mode toggled", !bypassMode);
-              }}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-xl border font-mono text-xs transition-all",
-                bypassMode
-                  ? "border-accent/60 bg-accent/10 text-accent"
-                  : "border-border/50 bg-card/40 text-muted-foreground hover:text-foreground hover:border-border"
-              )}
-            >
-              <Radio className="w-3.5 h-3.5" />
-              {bypassMode ? "Bypass: ON" : "Bypass ElevenLabs"}
-            </button>
-          )}
-
-          {/* Start / Stop */}
           {isActive ? (
             <button
               type="button"
@@ -659,16 +495,12 @@ export default function Voice() {
             <button
               type="button"
               onClick={handleStartSession}
-              disabled={isConnecting}
-              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-mono text-sm font-bold shadow-[0_0_20px_rgba(0,255,255,0.2)] hover:shadow-[0_0_28px_rgba(0,255,255,0.35)] transition-all disabled:opacity-40"
+              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-mono text-sm font-bold shadow-[0_0_20px_rgba(0,255,255,0.2)] hover:shadow-[0_0_28px_rgba(0,255,255,0.35)] transition-all"
             >
               <Mic className="w-4 h-4" />
-              {bypassMode ? "Start (No ElevenLabs)" : "Start Voice"}
+              Start Voice
             </button>
-          ) : null}
-
-          {/* Cancel while connecting */}
-          {isConnecting && (
+          ) : (
             <button
               type="button"
               onClick={handleStop}
@@ -678,39 +510,6 @@ export default function Voice() {
             </button>
           )}
         </div>
-
-        {/* ── Debug Panel ── */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="w-full max-w-lg rounded-xl border border-border/30 bg-card/30 p-4 font-mono text-[11px] space-y-1.5"
-        >
-          <p className="text-muted-foreground/40 tracking-widest uppercase text-[10px] mb-2">
-            Debug Panel
-          </p>
-
-          <DebugRow label="Secure Context" value={isSecureContext} bool />
-          <DebugRow label="mediaDevices API" value={hasMediaDevices} bool />
-          <DebugRow label="Current State"   value={voiceState} mono />
-          <DebugRow label="Session Live"    value={sessionLiveRef.current} bool />
-          <DebugRow label="Bypass Mode"     value={bypassMode} bool />
-          <DebugRow label="Mic Stream"
-            value={micStreamRef.current ? "active" : "none"}
-            color={micStreamRef.current ? "text-emerald-400" : "text-muted-foreground/50"}
-          />
-          {micTestResult && (
-            <DebugRow label="Mic Test"
-              value={micTestResult}
-              color={micTestResult.startsWith("GRANTED") ? "text-emerald-400" : "text-red-400"}
-            />
-          )}
-          {errorMsg && (
-            <div className="pt-1.5 border-t border-border/20">
-              <span className="text-muted-foreground/40">Last Error: </span>
-              <span className="text-red-400 break-words">{errorMsg}</span>
-            </div>
-          )}
-        </motion.div>
 
         {/* ── Error Card ── */}
         <AnimatePresence>
@@ -765,44 +564,6 @@ export default function Voice() {
       <footer className="relative z-10 text-center pb-6 font-mono text-[10px] text-muted-foreground/25">
         Assessment based on available public web evidence · Not financial advice
       </footer>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// DebugRow helper
-// ---------------------------------------------------------------------------
-
-interface DebugRowProps {
-  label: string;
-  value: boolean | string;
-  bool?: boolean;
-  mono?: boolean;
-  color?: string;
-}
-
-function DebugRow({ label, value, bool, mono, color }: DebugRowProps) {
-  let display: React.ReactNode;
-  let cls = color ?? "text-foreground/70";
-
-  if (bool && typeof value === "boolean") {
-    display = value ? (
-      <span className="flex items-center gap-1 text-emerald-400">
-        <Wifi className="w-3 h-3" /> yes
-      </span>
-    ) : (
-      <span className="flex items-center gap-1 text-red-400">
-        <WifiOff className="w-3 h-3" /> no
-      </span>
-    );
-  } else {
-    display = <span className={cn(mono ? "text-primary" : cls)}>{String(value)}</span>;
-  }
-
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <span className="text-muted-foreground/50 shrink-0">{label}</span>
-      <span className="text-right">{display}</span>
     </div>
   );
 }
