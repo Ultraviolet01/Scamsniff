@@ -1,0 +1,90 @@
+ScamSniff is showing almost the same verdict and score for very different inputs. Different projects still end up with the same “Caution” result and similar scores.
+
+Please debug and fix the scoring pipeline so the verdict actually changes based on the evidence.
+
+Problem symptoms:
+- different inputs produce nearly identical scores
+- verdict often defaults to “Caution”
+- details may differ, but the final score does not respond enough
+- this makes the analysis feel fake or hardcoded
+
+Please inspect the full analysis pipeline step by step:
+
+1. Evidence collection
+- verify the Firecrawl results are actually reaching the scoring layer
+- log the structured evidence object before scoring
+- confirm official sources, docs, github, community mentions, and warnings are all present in the input to the scorer
+
+2. Scoring logic
+- inspect whether there is a hardcoded default score or default verdict
+- inspect whether fallback logic is overriding the computed score
+- inspect whether thresholds are too narrow and causing most results to land in the same bucket
+- inspect whether positive and negative signals are canceling each other in an overly flat way
+
+3. Rebuild the scoring model with clearer weighting
+Use a weighted scoring model with wider spread.
+
+Suggested model:
+Start from a neutral baseline, then adjust.
+
+Positive signals:
+- official website found: lower risk significantly
+- official docs found: lower risk
+- active github found: lower risk
+- credible third-party coverage: lower risk
+- known team/company footprint: lower risk
+- security/audit evidence: lower risk
+
+Negative signals:
+- multiple credible scam/fraud/exploit reports: increase risk significantly
+- no official site: increase risk
+- no docs: increase risk
+- no github for a technical project: increase risk
+- suspicious branding or vague identity: increase risk
+- community-only warnings: slight increase, not huge
+- missing third-party validation: small caution signal, not a major red flag
+
+4. Differentiate by input type
+- x_handle should not be scored like a full project site
+- website_url should prioritize branding, trust elements, and official identity
+- token/project name should prioritize docs, site, github, listings, team, and broader footprint
+
+5. Force score spread
+Make sure the scoring system can realistically produce:
+- Low Risk
+- Caution
+- High Risk
+- Extreme Risk
+Do not let most items collapse into one middle bucket.
+
+6. Improve fallback behavior
+- if evidence is sparse, say “Limited public evidence”
+- do not automatically return “Caution” unless the evidence genuinely supports it
+- if there is strong official footprint and weak negatives, allow “Low Risk”
+- if there are strong credible warnings, allow “High Risk” or “Extreme Risk”
+
+7. Add debug output temporarily
+For each analysis, log:
+- baseline score
+- each positive adjustment
+- each negative adjustment
+- final numeric score
+- final verdict
+- reason for verdict bucket
+
+8. Test against these examples and compare outputs:
+- Coinbase
+- Uniswap
+- Firecrawl
+- a random fake token name like MoonPumpX
+- a suspicious-looking URL
+- an unknown X handle
+
+Expected result:
+These should not all get the same score or verdict.
+
+After fixing, explain:
+- what caused the score collapse
+- whether it was hardcoded fallback, narrow thresholds, or ignored evidence
+- the exact files/functions changed
+- how the new weighting now creates real differentiation

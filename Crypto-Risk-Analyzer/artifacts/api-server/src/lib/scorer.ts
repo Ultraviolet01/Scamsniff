@@ -11,6 +11,7 @@
  */
 import { SearchResult } from "./firecrawl";
 import { InputType } from "./classifier";
+import { logger } from "./logger";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -143,31 +144,65 @@ interface SignalPattern {
   baseWeight: number;
 }
 
-const RISK_SIGNAL_PATTERNS: SignalPattern[] = [
-  { pattern: /\brug\s*pull\b/i,          label: "Rug pull reports found",                  baseWeight: 30 },
-  { pattern: /\bexit\s*scam\b/i,          label: "Exit scam reports found",                 baseWeight: 30 },
-  { pattern: /\bponzi\b/i,                label: "Ponzi scheme allegations",                baseWeight: 25 },
-  { pattern: /\bfraud\b/i,                label: "Fraud allegations found",                 baseWeight: 20 },
-  { pattern: /\bcharged?\b.*\bcrypto\b/i, label: "Legal or regulatory charges found",       baseWeight: 25 },
-  { pattern: /\bscam\b/i,                 label: "Scam reports found",                      baseWeight: 18 },
-  { pattern: /\bexploit\b/i,              label: "Exploit or hack reports found",            baseWeight: 18 },
-  { pattern: /\bhack(ed)?\b/i,            label: "Hack reports found",                      baseWeight: 15 },
-  { pattern: /\bphish(ing)?\b/i,          label: "Phishing activity reported",              baseWeight: 20 },
-  { pattern: /\bimpersonat/i,             label: "Impersonation warnings found",             baseWeight: 18 },
-  { pattern: /\bguaranteed\s+(return|profit|gain)/i, label: "Guaranteed returns language",  baseWeight: 22 },
-  { pattern: /\b100%\s+(profit|return|gain)\b/i,     label: "Unrealistic return promises",  baseWeight: 22 },
-  { pattern: /\bget\s+rich\s+quick\b/i,   label: "Get-rich-quick language",                 baseWeight: 18 },
-  { pattern: /\bdo\s+not\s+(invest|buy)\b/i, label: "Community warns against investing",    baseWeight: 14 },
-  { pattern: /\bstay\s+away\b/i,           label: "Community tells users to avoid this",    baseWeight: 12 },
-  { pattern: /\bsentenced?\b/i,            label: "Criminal conviction or sentencing found", baseWeight: 45 },
-  { pattern: /\bconvicted?\b/i,            label: "Criminal conviction or sentencing found", baseWeight: 45 },
-  { pattern: /\bfound\s+guilty\b/i,        label: "Criminal conviction or sentencing found", baseWeight: 45 },
+/**
+ * HIGH_SEVERITY_RISK_PATTERNS are specific enough that they are also checked
+ * against the first 600 characters of the page body (markdown excerpt).
+ *
+ * Why? Criminal conviction / fraud language often lives in the article body
+ * rather than the search snippet. These patterns are precise enough that
+ * they are very unlikely to produce false positives even in a body excerpt
+ * (unlike "scam" or "hack" which can appear in defensive/informational contexts).
+ *
+ * Example: Wikipedia's SafeMoon article says "convicted" in the body
+ * but not in the search-engine description snippet.
+ */
+const HIGH_SEVERITY_RISK_PATTERNS: SignalPattern[] = [
+  { pattern: /\brug\s*pull\b/i,           label: "Rug pull reports found",                   baseWeight: 30 },
+  { pattern: /\bexit\s*scam\b/i,           label: "Exit scam reports found",                  baseWeight: 30 },
+  { pattern: /\bponzi\b/i,                 label: "Ponzi scheme allegations",                 baseWeight: 25 },
+  { pattern: /\bfraud\b/i,                 label: "Fraud allegations found",                  baseWeight: 20 },
+  { pattern: /\bcharged?\b.*\bcrypto\b/i,  label: "Legal or regulatory charges found",        baseWeight: 25 },
+  { pattern: /\bsentenced?\b/i,            label: "Criminal conviction or sentencing found",  baseWeight: 45 },
+  { pattern: /\bconvicted?\b/i,            label: "Criminal conviction or sentencing found",  baseWeight: 45 },
+  { pattern: /\bfound\s+guilty\b/i,        label: "Criminal conviction or sentencing found",  baseWeight: 45 },
   { pattern: /\bindicted?\b/i,             label: "Criminal indictment found",                baseWeight: 35 },
   { pattern: /\barrest(?:ed)?\b/i,         label: "Arrest reported",                          baseWeight: 25 },
 ];
 
+/**
+ * GENERAL_RISK_PATTERNS: checked against title + description ONLY.
+ *
+ * These patterns are broader and produce false positives when applied to
+ * body text. "scam" appears in security advice articles, "hack" appears in
+ * technical docs, "phishing" appears on brand security pages, etc.
+ */
+const GENERAL_RISK_PATTERNS: SignalPattern[] = [
+  { pattern: /\bscam\b/i,                  label: "Scam reports found",                       baseWeight: 18 },
+  { pattern: /\bexploit\b/i,               label: "Exploit or hack reports found",             baseWeight: 18 },
+  { pattern: /\bhack(ed)?\b/i,             label: "Hack reports found",                        baseWeight: 15 },
+  { pattern: /\bphish(ing)?\b/i,           label: "Phishing activity reported",               baseWeight: 20 },
+  { pattern: /\bimpersonat/i,              label: "Impersonation warnings found",              baseWeight: 18 },
+  { pattern: /\bguaranteed\s+(return|profit|gain)/i, label: "Guaranteed returns language",    baseWeight: 22 },
+  { pattern: /\b100%\s+(profit|return|gain)\b/i,     label: "Unrealistic return promises",    baseWeight: 22 },
+  { pattern: /\bget\s+rich\s+quick\b/i,    label: "Get-rich-quick language",                  baseWeight: 18 },
+  { pattern: /\bdo\s+not\s+(invest|buy)\b/i, label: "Community warns against investing",      baseWeight: 14 },
+  { pattern: /\bstay\s+away\b/i,            label: "Community tells users to avoid this",     baseWeight: 12 },
+];
+
+/** Combined list for callers that need the full set */
+const RISK_SIGNAL_PATTERNS: SignalPattern[] = [
+  ...HIGH_SEVERITY_RISK_PATTERNS,
+  ...GENERAL_RISK_PATTERNS,
+];
+
 const POSITIVE_SIGNAL_PATTERNS: SignalPattern[] = [
-  { pattern: /\baudit(ed)?\b/i,            label: "Security audit mentioned",               baseWeight: -18 },
+  /**
+   * Require specific audit context to avoid false positives like:
+   *   "Does anyone know if X was audited?" (question, not confirmation)
+   *   "X claimed to be audited before the rug pull" (negative context)
+   * Valid matches: "security audit", "smart contract audit", "audited by CertiK"
+   */
+  { pattern: /\b(?:security|smart[\s-]?contract|code)\s+audit\b|\baudit(?:ed)?\s+by\b/i, label: "Security audit mentioned", baseWeight: -18 },
   { pattern: /\bopen[\s-]?source\b/i,      label: "Open source codebase",                  baseWeight: -14 },
   { pattern: /\bwhitepaper\b/i,            label: "Whitepaper available",                   baseWeight: -10 },
   { pattern: /\bregulated\b/i,             label: "Regulated entity",                       baseWeight: -14 },
@@ -251,7 +286,7 @@ function detectLegitimacyFootprint(results: SearchResult[], input: string): Legi
     hasOfficialDocs,
     hasCredibleMedia:    results.some((r) => classifySource(r) === "credible_third_party"),
     hasBlockExplorer:    urls.some((u) => ["etherscan.io","bscscan.com","solscan.io","polygonscan.com"].some((e) => u.includes(e))),
-    hasSecurityAudit:    results.some((r) => /\baudit(ed)?\b/i.test(r.title + " " + (r.description ?? ""))),
+    hasSecurityAudit:    results.some((r) => /\b(?:security|smart[\s-]?contract|code)\s+audit\b|\baudit(?:ed)?\s+by\b|\bcertik\b|\bhalborn\b|\btrail\s*of\s*bits\b/i.test(r.title + " " + (r.description ?? ""))),
     hasTwitterXPresence: urls.some((u) => u.includes("twitter.com") || u.includes("x.com")),
     hasContactInfo:      /\bcontact\b|\bteam\b|\babout\s+us\b/.test(allText),
   };
@@ -311,26 +346,86 @@ function analyzeSource(
   seenPositiveLabels: Set<string>
 ): { evidence: EvidenceItem; scoreDelta: number } {
   const sourceType = classifySource(result);
-  const text = `${result.title} ${result.description ?? ""} ${(result.markdown ?? "").slice(0, 2000)}`;
   const riskMultiplier = RISK_MULTIPLIER[sourceType];
   const positiveMultiplier = POSITIVE_MULTIPLIER[sourceType];
   let scoreDelta = 0;
   const hitLabels: string[] = [];
   let impact: EvidenceImpact = "neutral";
 
-  for (const { pattern, label, baseWeight } of RISK_SIGNAL_PATTERNS) {
-    if (pattern.test(text)) {
-      scoreDelta += baseWeight * riskMultiplier;
-      // Always record what this specific source found (for the reason label)
-      hitLabels.push(label.toLowerCase());
-      // Global deduplication only for the risk_signals list
-      seenRiskLabels.add(label);
-      impact = "negative";
+  /**
+   * Self-domain bypass: if this result comes from the subject's own website
+   * (e.g. coinbase.com/security/phishing-attacks when analysing "Coinbase"),
+   * its risk signals should be ignored entirely. Security advice pages,
+   * terms-of-service, and help articles on the subject's own domain naturally
+   * contain words like "phishing", "fraud", "scam" without meaning the entity
+   * itself is risky. Positive signals are still counted (shows official presence).
+   */
+  let subjectSlug = input
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split(".")[0]
+    .replace(/[^a-z0-9]/g, "");
+  let isOwnDomain = false;
+  if (subjectSlug.length >= 4) {
+    try {
+      const hostLabel = new URL(result.url).hostname
+        .replace(/^www\./, "")
+        .split(".")[0]
+        .replace(/[^a-z0-9]/g, "");
+      isOwnDomain = hostLabel.includes(subjectSlug) || subjectSlug.includes(hostLabel);
+    } catch { /* non-URL results */ }
+  }
+
+  /**
+   * All signal matching uses title + description only.
+   *
+   * Using the full markdown body creates too many false positives:
+   *   • Risk patterns: "Coinbase phishing" safety articles contain "phishing"
+   *     in their body even when they're defending Coinbase, not flagging it.
+   *   • Positive patterns: "SafeMoon claimed to be audited" reddit posts
+   *     contain "audit" in a negative context, falsely lowering the risk score.
+   *
+   * Title and description are the search-engine-curated snippets most
+   * directly describing what the page is actually about — far fewer false hits.
+   */
+  const titleDesc = `${result.title} ${result.description ?? ""}`;
+
+  // First 600 chars of body used ONLY for high-severity patterns (see above).
+  const bodyExcerpt = (result.markdown ?? "").slice(0, 600);
+
+  if (!isOwnDomain) {
+    // HIGH_SEVERITY: check title+description AND brief body excerpt.
+    // These patterns (convicted, fraud, rug pull…) are specific enough to avoid
+    // false positives even in the body, and catching them is critical for
+    // accurate High/Extreme verdicts.
+    const highSevText = `${titleDesc} ${bodyExcerpt}`;
+    for (const { pattern, label, baseWeight } of HIGH_SEVERITY_RISK_PATTERNS) {
+      if (pattern.test(highSevText)) {
+        scoreDelta += baseWeight * riskMultiplier;
+        hitLabels.push(label.toLowerCase());
+        seenRiskLabels.add(label);
+        impact = "negative";
+      }
+    }
+
+    // GENERAL: title + description only. These are broader patterns ("scam",
+    // "hack", "phishing") that produce too many false positives in body text.
+    for (const { pattern, label, baseWeight } of GENERAL_RISK_PATTERNS) {
+      if (pattern.test(titleDesc)) {
+        scoreDelta += baseWeight * riskMultiplier;
+        hitLabels.push(label.toLowerCase());
+        seenRiskLabels.add(label);
+        impact = "negative";
+      }
     }
   }
 
+  // POSITIVE SIGNALS: title + description only.
+  // "audit" in body text often appears in negative contexts ("SafeMoon claimed
+  // to be audited before the rug pull") — using title+description is safer.
   for (const { pattern, label, baseWeight } of POSITIVE_SIGNAL_PATTERNS) {
-    if (pattern.test(text)) {
+    if (pattern.test(titleDesc)) {
       scoreDelta += baseWeight * positiveMultiplier;
       hitLabels.push(label.toLowerCase());
       seenPositiveLabels.add(label);
@@ -338,20 +433,7 @@ function analyzeSource(
     }
   }
 
-  // Apply legitimacy baseline ONLY when the source is not flagging risk.
-  // A CoinDesk article reporting SafeMoon's fraud conviction should not get
-  // a -3 legitimacy discount just because it's from a credible domain.
-  if (impact !== "negative") {
-    const nonNegativeBaseline: Record<SourceType, number> = {
-      official:                  -4,
-      credible_third_party:      -3,
-      user_generated:             0,
-      suspicious_or_low_quality:  0,
-      unknown:                    0,
-    };
-    scoreDelta += nonNegativeBaseline[sourceType];
-  }
-  // Suspicious/low-quality sources always add a small risk premium
+  // Suspicious/low-quality sources add a small risk premium regardless of content.
   if (sourceType === "suspicious_or_low_quality") scoreDelta += 3;
   if (scoreDelta < -2 && impact === "neutral") impact = "positive";
 
@@ -597,6 +679,25 @@ function zeroResultResponse(input: string, inputType: InputType): ScoreResult {
 // Main export
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-input-type starting risk baseline.
+ *
+ * A project with ZERO signals starts here. Strong legitimacy signals drive
+ * the score down (towards 0 / Low Risk). Risk signals drive it up.
+ * This prevents unknown projects from always landing at 0 when they have
+ * minimal web presence, and creates a wider spread across verdict buckets.
+ *
+ * Values are intentionally modest so a project with just a GitHub + docs
+ * easily reaches Low Risk, while a project with nothing stays in Caution.
+ */
+const BASE_RISK_BY_TYPE: Record<InputType, number> = {
+  project_name:  12,
+  token_name:    16,   // tokens carry more inherent risk without an established footprint
+  x_handle:      14,   // handles are easy to create; harder to verify as legitimate projects
+  website_url:   10,
+  unknown:       15,
+};
+
 export function scoreResults(
   input: string,
   results: SearchResult[],
@@ -607,13 +708,20 @@ export function scoreResults(
   const seenRiskLabels = new Set<string>();
   const seenPositiveLabels = new Set<string>();
   const allEvidence: EvidenceItem[] = [];
-  let rawScore = 0;
   const credibleRiskLabels = new Set<string>();
+  const debugLog: string[] = [];
+
+  // Start from a per-type baseline instead of zero.
+  let rawScore = BASE_RISK_BY_TYPE[inputType];
+  debugLog.push(`[SCORE] base(${inputType})=+${rawScore}`);
 
   for (const result of results) {
     const { evidence, scoreDelta } = analyzeSource(result, input, seenRiskLabels, seenPositiveLabels);
     allEvidence.push(evidence);
     rawScore += scoreDelta;
+    if (scoreDelta !== 0) {
+      debugLog.push(`[SCORE] source="${result.url.slice(0,60)}" type=${evidence.source_type} impact=${evidence.impact} delta=${scoreDelta > 0 ? "+" : ""}${scoreDelta.toFixed(1)}`);
+    }
     // Track which risk labels came specifically from credible/official sources
     if (
       evidence.impact === "negative" &&
@@ -626,6 +734,8 @@ export function scoreResults(
     }
   }
 
+  debugLog.push(`[SCORE] after_sources=${rawScore.toFixed(1)}`);
+
   const footprint = detectLegitimacyFootprint(results, input);
 
   // Credible media structural bonus only applies when at least some credible
@@ -635,17 +745,25 @@ export function scoreResults(
     (e) => e.source_type === "credible_third_party" && e.impact !== "negative"
   );
 
-  // Structural bonuses
+  /**
+   * Structural bonuses — awarded for presence of trust anchors.
+   *
+   * These are intentionally smaller than they used to be because we no longer
+   * apply a per-source baseline credit (which was causing score collapse when
+   * a project had 20+ credible pages). Each structural element only grants
+   * its bonus once, regardless of how many pages prove it.
+   */
   const structuralAdjustments: { condition: boolean; delta: number; positive: string }[] = [
-    { condition: footprint.hasGitHub,              delta: -10, positive: "Active GitHub repository found" },
-    { condition: footprint.hasOfficialDocs,        delta: -8,  positive: "Official documentation found" },
-    { condition: hasCredibleNonNegativeCoverage,   delta: -8,  positive: "Coverage by credible media" },
-    { condition: footprint.hasBlockExplorer,       delta: -5,  positive: "Verified on block explorer" },
-    { condition: footprint.hasSecurityAudit,       delta: -10, positive: "Security audit evidence found" },
+    { condition: footprint.hasGitHub,              delta: -8,  positive: "Active GitHub repository found" },
+    { condition: footprint.hasOfficialDocs,        delta: -6,  positive: "Official documentation found" },
+    { condition: hasCredibleNonNegativeCoverage,   delta: -5,  positive: "Coverage by credible media" },
+    { condition: footprint.hasBlockExplorer,       delta: -4,  positive: "Verified on block explorer" },
+    { condition: footprint.hasSecurityAudit,       delta: -8,  positive: "Security audit evidence found" },
+    { condition: footprint.hasOfficialSite,        delta: -5,  positive: "Official website identified" },
   ];
 
   if (inputType === "x_handle" && footprint.hasTwitterXPresence) {
-    structuralAdjustments.push({ condition: true, delta: -5, positive: "Active social media presence found" });
+    structuralAdjustments.push({ condition: true, delta: -4, positive: "Active social media presence found" });
   }
 
   const positiveSignals: string[] = [...seenPositiveLabels];
@@ -653,9 +771,12 @@ export function scoreResults(
   for (const { condition, delta, positive } of structuralAdjustments) {
     if (condition) {
       rawScore += delta;
+      debugLog.push(`[SCORE] structural "${positive}" delta=${delta}`);
       if (!positiveSignals.includes(positive)) positiveSignals.push(positive);
     }
   }
+
+  debugLog.push(`[SCORE] after_structural=${rawScore.toFixed(1)}`);
 
   // Missing signals — context-aware
   const missingRules = buildMissingSignalRules(footprint, inputType);
@@ -665,8 +786,11 @@ export function scoreResults(
     if (!condition) {
       missingSignals.push(label);
       rawScore += riskDelta;
+      debugLog.push(`[SCORE] missing "${label}" delta=+${riskDelta}`);
     }
   }
+
+  debugLog.push(`[SCORE] after_missing=${rawScore.toFixed(1)}`);
 
   // Dampen community-only negative accumulation
   const ugNegativeCount = allEvidence.filter(
@@ -675,6 +799,7 @@ export function scoreResults(
   if (ugNegativeCount > 2) {
     // Each community negative post beyond the first 2 contributes at most 3 points
     rawScore -= (ugNegativeCount - 2) * 5;
+    debugLog.push(`[SCORE] ug_dampening delta=${-(ugNegativeCount - 2) * 5}`);
   }
 
   // When a strong official footprint exists and NO credible sources are negative,
@@ -689,8 +814,12 @@ export function scoreResults(
     (footprint.hasGitHub || footprint.hasOfficialDocs) && footprint.hasCredibleMedia;
 
   if (strongOfficialFootprint && negativeCredibleCount === 0) {
+    const before = rawScore;
     rawScore = Math.min(rawScore, 38);
+    if (rawScore !== before) debugLog.push(`[SCORE] community_cap applied (${before.toFixed(1)}→38)`);
   }
+
+  debugLog.push(`[SCORE] after_cap=${rawScore.toFixed(1)} credible_negatives=${negativeCredibleCount}`);
 
   // Score floors: government/law-enforcement findings cannot be cancelled by legitimacy bonuses.
   const CONVICTION_LABELS = new Set([
@@ -704,12 +833,21 @@ export function scoreResults(
   if (hasCredibleConviction) {
     // Confirmed conviction from a credible/official source → always at least Extreme Risk (66+)
     rawScore = Math.max(rawScore, 66);
+    debugLog.push(`[SCORE] conviction_floor → 66`);
   } else if (hasCredibleArrest || negativeCredibleCount >= 3) {
     // Multiple credible negatives or credible arrest → floor at High Risk (50+)
     rawScore = Math.max(rawScore, 50);
+    debugLog.push(`[SCORE] arrest/3x_credible_floor → 50`);
   } else if (negativeCredibleCount >= 2) {
     // Two credible sources raising red flags → floor at upper Caution (41+)
     rawScore = Math.max(rawScore, 41);
+    debugLog.push(`[SCORE] 2x_credible_floor → 41`);
+  } else if (negativeCredibleCount >= 1) {
+    // Even one credible or official source flagging this entity as risky is meaningful.
+    // A single scam-list entry, regulatory warning, or blacklist mention from
+    // a credible domain should push the score at least into Caution territory.
+    rawScore = Math.max(rawScore, 22);
+    debugLog.push(`[SCORE] 1x_credible_floor → 22`);
   }
 
   const communityNegativeCount = allEvidence.filter(
@@ -720,6 +858,9 @@ export function scoreResults(
   const verdict = toVerdict(score);
   const confidence = toConfidence(results.length, footprint, allEvidence, inputType);
   const riskSignals = [...seenRiskLabels];
+
+  debugLog.push(`[SCORE] FINAL score=${score} verdict="${verdict}" confidence=${confidence}`);
+  logger.info({ input, inputType, score, verdict, scoreBreakdown: debugLog }, "Score computed");
 
   const sortedEvidence = [...allEvidence].sort((a, b) => {
     const order: Record<EvidenceImpact, number> = { negative: 0, positive: 1, neutral: 2 };

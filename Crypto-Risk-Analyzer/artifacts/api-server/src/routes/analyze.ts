@@ -31,17 +31,22 @@ function buildQueries(input: string, inputType: InputType): string[] {
 
     case "website_url": {
       let domain = input;
+      let projectName = "";
       try {
         domain = new URL(input).hostname.replace(/^www\./, "");
+        // Extract the meaningful name part: "safemoon" from "safemoon.com"
+        // This is used for a broad reputation search that catches news articles
+        // referencing the project by name (e.g. criminal conviction coverage).
+        projectName = domain.split(".")[0];
       } catch { /* keep original */ }
       return [
         input,
+        projectName || domain,          // broad project-name search (no quotes) to surface news/conviction coverage
         `"${domain}" review legit`,
-        `"${domain}" team github`,
         `"${domain}" scam`,
-        `"${domain}" docs whitepaper`,
+        `"${domain}" team github`,
         `"${domain}" audit`,
-      ];
+      ].filter((q, i, arr) => arr.indexOf(q) === i); // deduplicate
     }
 
     case "token_name":
