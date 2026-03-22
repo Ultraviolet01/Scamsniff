@@ -187,11 +187,16 @@ export default function Voice() {
     }
   });
 
-  const onDisconnect = useStableCallback(() => {
+  const onDisconnect = useStableCallback((event?: unknown) => {
+    // Log the full close event so we can see code + reason from ElevenLabs
+    const ev = event as { code?: number; reason?: string; wasClean?: boolean } | undefined;
     log("onDisconnect fired", {
       sessionLive: sessionLiveRef.current,
       voiceState: voiceStateRef.current,
       bypass: bypassRef.current,
+      closeCode: ev?.code,
+      closeReason: ev?.reason || "(no reason)",
+      wasClean: ev?.wasClean,
     });
 
     // Only reset if the session was genuinely alive (not a handshake artifact)
@@ -209,6 +214,10 @@ export default function Voice() {
     } else {
       log("onDisconnect ignored — session was never live (handshake artifact)");
     }
+  });
+
+  const onDebug = useStableCallback((info: unknown) => {
+    log("onDebug (ElevenLabs internal)", info);
   });
 
   const onError = useStableCallback((err: unknown) => {
@@ -279,6 +288,7 @@ export default function Voice() {
     onDisconnect,
     onError,
     onMessage,
+    onDebug,
   });
 
   // Keep listening/speaking in sync with isSpeaking flag
@@ -437,16 +447,12 @@ export default function Voice() {
     }
 
     // Step 3: start ElevenLabs session
-    log("Calling conversation.startSession...");
+    // NOTE: No prompt overrides — the agent already has the correct system prompt
+    // configured via the ElevenLabs API. Sending overrides was previously causing
+    // the server to reject the initialization message and drop the connection.
+    log("Calling conversation.startSession (no overrides)...");
     try {
-      await conversation.startSession({
-        signedUrl,
-        overrides: {
-          agent: {
-            prompt: { prompt: AGENT_SYSTEM_PROMPT },
-          },
-        },
-      });
+      await conversation.startSession({ signedUrl });
       log("conversation.startSession resolved (onConnect will set listening state)");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not start voice session.";
