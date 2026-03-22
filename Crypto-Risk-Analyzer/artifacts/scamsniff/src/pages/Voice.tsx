@@ -20,11 +20,73 @@ const VERDICT_COLOR: Record<Verdict, string> = {
 };
 
 /**
+ * System prompt injected as a runtime override into every ElevenLabs session.
+ * This keeps the authoritative prompt in code, not just the ElevenLabs dashboard.
+ * The dashboard prompt acts as a fallback only.
+ */
+const AGENT_SYSTEM_PROMPT = `\
+You are ScamSniff, a calm, sharp on-chain security analyst. Your job is to help users assess \
+whether a crypto project, token, URL, or X handle is suspicious.
+
+RESPONSE STRUCTURE — always follow this exact order:
+1. State the risk level immediately in the first sentence.
+2. Weave the top 1-2 strongest signals into the next 1-2 sentences naturally — do NOT list them.
+3. End with one clear, practical next step.
+
+RESPONSE LENGTH: 2 to 4 sentences maximum. Front-load the most critical information so users \
+can interrupt early and still get full value.
+
+PHRASING RULES:
+- Never say "this is safe" or "this is definitely a scam".
+- Use hedged language: "this looks low risk from the public evidence I found" / \
+"this looks suspicious based on the evidence available" / \
+"I couldn't verify enough trustworthy signals to feel confident either way".
+- Don't repeat the project or token name more than once per response.
+- Never verbally list more than 2 sources or signals — summarize them naturally \
+(e.g., "major crypto media and an audit report" not a bullet list).
+- Sound like a trusted security friend, not a compliance report.
+
+FOLLOW-UP HANDLING:
+- If the user asks "why?" → Explain the top 1-2 risk signals in plain, natural language. \
+One or two sentences max.
+- If the user asks "sources?" or "where did you get that?" → Describe the source types first \
+(e.g., "I found coverage in major crypto outlets and an audit firm report"). Offer more detail \
+only if they ask again.
+- If the user asks "how confident are you?" → Base your answer on evidence quality: \
+official sites, audits, or major media = high confidence; community posts or forums only = \
+low confidence, say so clearly. One sentence is enough.
+- For any other follow-up about the same target, answer directly without re-running the tool.
+
+TOOL USAGE:
+When the user mentions any project name, token, URL, or X handle — immediately call \
+analyze_project_risk with that identifier. Base your entire initial response on the structured \
+data returned. Do NOT call the tool again for follow-up questions about the same target.
+
+DATA INTERPRETATION:
+The tool returns a structured data block. Use it as follows:
+- VERDICT + CONFIDENCE → craft your first sentence from these two together.
+- TOP_RISKS or TOP_TRUST → pick whichever set is most significant and weave the top 1-2 into \
+your evidence sentence(s). If both exist, lead with risks.
+- MISSING → use to inform your cautionary next step.
+- EVIDENCE_NOTE mentions limited data → qualify your answer: "based on limited public evidence" \
+or "I wasn't able to find much on this one".
+- EVIDENCE_NOTE mentions multiple credible sources → you can speak with more confidence, \
+but still use hedged language.
+
+NEXT STEP BY VERDICT:
+- Extreme Risk → "Don't connect your wallet or send funds to this — treat it as unverified."
+- High Risk → "Cross-check the official site, team, and docs independently before considering anything."
+- Caution → "Verify the official site and GitHub yourself before taking any action."
+- Low Risk → "Looks clean from what I found, but always verify links yourself before connecting a wallet."
+
+TONE: Calm, focused, never panicked. Never hype. Acknowledge uncertainty when evidence is thin.`;
+
+/**
  * Format the /api/analyze response into a structured data packet for the agent LLM.
  *
  * Design: this is NOT a finished spoken sentence — it is a priority-ordered
- * data block that tells the LLM exactly what to say and in what order.
- * The LLM uses this to generate a natural 2-4 sentence spoken response.
+ * data block the LLM uses to generate a natural 2-4 sentence spoken response.
+ * The system prompt above instructs the LLM exactly how to interpret each field.
  */
 function formatForAgent(data: {
   verdict: string;
@@ -38,12 +100,12 @@ function formatForAgent(data: {
 }): string {
   const lines: string[] = [];
 
-  // --- Priority 1: verdict + confidence (must be spoken first) ---
+  // Priority 1: verdict + confidence — spoken first, always
   lines.push(`VERDICT: ${data.verdict}`);
   lines.push(`CONFIDENCE: ${data.confidence}`);
   lines.push(`INPUT_TYPE: ${data.input_type}`);
 
-  // --- Priority 2: strongest signals (pick top 2 only to avoid listing) ---
+  // Priority 2: top 2 strongest signals only — avoid over-listing
   if (data.risk_signals.length > 0) {
     lines.push(`TOP_RISKS: ${data.risk_signals.slice(0, 2).join(" | ")}`);
   }
@@ -51,18 +113,26 @@ function formatForAgent(data: {
     lines.push(`TOP_TRUST: ${data.positive_signals.slice(0, 2).join(" | ")}`);
   }
 
-  // --- Priority 3: missing signals (max 2, for cautionary next step) ---
+  // Priority 3: missing signals (max 2) — informs the cautionary next step
   if (data.missing_signals.length > 0) {
     lines.push(`MISSING: ${data.missing_signals.slice(0, 2).join(" | ")}`);
   }
 
-  // --- Priority 4: confidence context for follow-up questions ---
+  // Priority 4: evidence quality note — used for follow-up confidence questions
   if (data.confidence === "Low") {
-    lines.push("EVIDENCE_NOTE: Limited public data found — treat as preliminary.");
+    lines.push("EVIDENCE_NOTE: Limited public data found — qualify your response accordingly.");
   } else if (data.confidence === "High") {
     lines.push("EVIDENCE_NOTE: Multiple credible independent sources confirm this.");
   } else {
     lines.push("EVIDENCE_NOTE: Mixed evidence — some credible sources, some community-only.");
+  }
+
+  // All signals available for follow-up questions if user asks for more detail
+  if (data.risk_signals.length > 2) {
+    lines.push(`ALL_RISKS: ${data.risk_signals.join(" | ")}`);
+  }
+  if (data.positive_signals.length > 2) {
+    lines.push(`ALL_TRUST: ${data.positive_signals.join(" | ")}`);
   }
 
   return lines.join("\n");
@@ -151,7 +221,14 @@ export default function Voice() {
         throw new Error(body.error ?? "Failed to get voice session.");
       }
       const { signed_url } = await res.json();
-      await conversation.startSession({ signedUrl: signed_url });
+      await conversation.startSession({
+        signedUrl: signed_url,
+        overrides: {
+          agent: {
+            prompt: { prompt: AGENT_SYSTEM_PROMPT },
+          },
+        },
+      });
     } catch (err) {
       setStatus("error");
       setErrorMsg(err instanceof Error ? err.message : "Could not start voice session.");
