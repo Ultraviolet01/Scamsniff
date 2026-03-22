@@ -20,14 +20,12 @@ function buildQueries(input: string, inputType: InputType): string[] {
     case "x_handle": {
       const handle = input.replace(/^@/, "");
       return [
-        input,
-        `${input} official website`,
-        `${input} crypto project`,
-        `${input} github`,
-        `${handle} scam`,
-        `${handle} review`,
-        `${input} team`,
-        `${input} verified`,
+        input,                          // broad handle search
+        `${input} official website`,    // official presence
+        `${input} crypto project`,      // project identity
+        `${handle} scam review`,        // risk signals
+        `${handle} github team`,        // code + team footprint
+        `${input} verified legit`,      // legitimacy signals
       ];
     }
 
@@ -38,39 +36,35 @@ function buildQueries(input: string, inputType: InputType): string[] {
       } catch { /* keep original */ }
       return [
         input,
-        `site:${domain}`,
-        `"${domain}" team`,
-        `"${domain}" review`,
+        `"${domain}" review legit`,
+        `"${domain}" team github`,
         `"${domain}" scam`,
-        `"${domain}" github`,
-        `"${domain}" docs`,
-        `"${domain}" legit`,
+        `"${domain}" docs whitepaper`,
+        `"${domain}" audit`,
       ];
     }
 
     case "token_name":
       return [
-        input,
-        `${input} token official site`,
-        `${input} token whitepaper`,
-        `${input} token github`,
-        `${input} token audit`,
-        `${input} token review`,
-        `${input} token scam`,
-        `${input} token exploit`,
+        input,                           // broad token search
+        `${input} token official site`,  // site + presence
+        `${input} token github audit`,   // code + security
+        `${input} token whitepaper`,     // docs / legitimacy
+        `${input} token review`,         // third-party coverage
+        `${input} token scam exploit`,   // risk signals
       ];
 
     case "project_name":
     default:
+      // First 3 queries run as the initial batch — chosen to maximise coverage
+      // for well-known projects and trigger early-stop before running the rest.
       return [
-        input,
-        `${input} official website`,
-        `${input} docs`,
-        `${input} github`,
-        `${input} team`,
-        `${input} review`,
-        `${input} exploit`,
-        `${input} scam`,
+        input,                       // broad name search (highest signal)
+        `${input} official website`, // site + official presence
+        `${input} github`,           // code trustworthiness
+        `${input} docs whitepaper`,  // documentation / legitimacy
+        `${input} review`,           // credible third-party coverage
+        `${input} scam exploit`,     // risk signals
       ];
   }
 }

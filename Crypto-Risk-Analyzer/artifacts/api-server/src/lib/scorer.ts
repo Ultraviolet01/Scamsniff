@@ -210,14 +210,45 @@ interface LegitimacyFootprint {
   hasContactInfo: boolean;
 }
 
-function detectLegitimacyFootprint(results: SearchResult[]): LegitimacyFootprint {
+function detectLegitimacyFootprint(results: SearchResult[], input: string): LegitimacyFootprint {
   const urls = results.map((r) => r.url.toLowerCase());
   const allText = results.map((r) => `${r.title} ${r.description ?? ""}`).join(" ").toLowerCase();
 
+  // Normalize input for domain-matching: "SafeMoon" → "safemoon"
+  const querySlug = input.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  /**
+   * hasOfficialSite: true when ANY result looks like the project's own website.
+   * Three ways to qualify:
+   *  (a) URL pattern matches our official patterns (github, /docs/, whitepaper)
+   *  (b) URL domain's first label contains the project query slug
+   *      e.g. "safemoon.com" contains "safemoon" → official for query "SafeMoon"
+   *  (c) URL domain slug IS a prefix/suffix match of the query slug (≥4 chars)
+   */
+  const hasOfficialSite = results.some((r) => {
+    if (classifySource(r) === "official") return true;
+    if (querySlug.length < 4) return false;
+    try {
+      const hostname = new URL(r.url).hostname.toLowerCase().replace(/^www\./, "");
+      const domainLabel = hostname.split(".")[0]; // e.g. "safemoon" from "safemoon.com"
+      return domainLabel.includes(querySlug) || querySlug.includes(domainLabel);
+    } catch {
+      return false;
+    }
+  });
+
+  /**
+   * hasOfficialDocs: URL has /docs or docs. prefix, OR text explicitly mentions
+   * docs/whitepaper/documentation so readers know it exists.
+   */
+  const hasOfficialDocs =
+    urls.some((u) => u.includes("/docs") || u.includes("docs.") || u.includes("/documentation") || u.includes("whitepaper")) ||
+    /\bwhitepaper\b|\bdocumentation\b|\bofficial\s+docs?\b/i.test(allText);
+
   return {
     hasGitHub:           urls.some((u) => u.includes("github.com")),
-    hasOfficialSite:     results.some((r) => classifySource(r) === "official"),
-    hasOfficialDocs:     urls.some((u) => u.includes("/docs") || u.includes("docs.") || u.includes("/documentation")),
+    hasOfficialSite,
+    hasOfficialDocs,
     hasCredibleMedia:    results.some((r) => classifySource(r) === "credible_third_party"),
     hasBlockExplorer:    urls.some((u) => ["etherscan.io","bscscan.com","solscan.io","polygonscan.com"].some((e) => u.includes(e))),
     hasSecurityAudit:    results.some((r) => /\baudit(ed)?\b/i.test(r.title + " " + (r.description ?? ""))),
@@ -371,7 +402,12 @@ function buildSummary(
 ): string {
   if (resultCount === 0) {
     const subject = inputType === "x_handle" ? `the handle "${input}"` : `"${input}"`;
-    return `No web presence found for ${subject}. This is itself a risk indicator — legitimate projects and accounts leave a verifiable footprint. Treat this as unverified and exercise caution.`;
+    return `No public evidence found for ${subject}. Without a verifiable web footprint, this assessment is inconclusive — treat with caution and verify directly before taking any action.`;
+  }
+
+  if (resultCount <= 3) {
+    const subject = inputType === "x_handle" ? `the handle "${input}"` : `"${input}"`;
+    return `Only limited public evidence was found for ${subject} (${resultCount} source${resultCount === 1 ? "" : "s"}). This assessment is low-confidence — findings may be incomplete. Verify through direct sources before drawing conclusions.`;
   }
 
   const credibleCount = evidence.filter(
@@ -549,10 +585,10 @@ function zeroResultResponse(input: string, inputType: InputType): ScoreResult {
     verdict: "Caution",
     confidence: "Low",
     positive_signals: [],
-    risk_signals: ["No web presence found"],
+    risk_signals: ["No public evidence found"],
     missing_signals: missingByType[inputType],
-    summary: `No web presence found for "${input}". This is itself a risk indicator — legitimate projects and accounts leave a verifiable footprint. Treat this as unverified and exercise caution.`,
-    verdict_explanation: "No public data was found for this input. The assessment defaults to Caution because the absence of any web presence is itself a risk signal for a crypto project.",
+    summary: `No public evidence found for "${input}". Without a verifiable web footprint, this assessment is inconclusive — treat with caution and verify directly before taking any action.`,
+    verdict_explanation: "No public data was found for this input. The assessment defaults to Caution because the absence of any verifiable web presence is itself a risk signal for a crypto project.",
     evidence: [],
   };
 }
@@ -590,7 +626,7 @@ export function scoreResults(
     }
   }
 
-  const footprint = detectLegitimacyFootprint(results);
+  const footprint = detectLegitimacyFootprint(results, input);
 
   // Credible media structural bonus only applies when at least some credible
   // sources are not raising red flags (e.g. CoinDesk reporting SafeMoon fraud
