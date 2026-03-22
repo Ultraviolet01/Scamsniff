@@ -344,13 +344,20 @@ export default function Home() {
           <p className="text-muted-foreground text-base md:text-lg font-mono max-w-xl mx-auto leading-relaxed">
             On-chain threat intelligence for crypto projects, tokens, URLs, and X accounts.
           </p>
-          <div className="mt-4">
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
             <Link
               href="/voice"
               className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-accent/10 border border-accent/30 text-accent font-mono text-xs tracking-wider hover:bg-accent/20 transition-colors"
             >
               <Mic className="w-3.5 h-3.5" />
               Try Voice Mode
+            </Link>
+            <Link
+              href="/docs"
+              className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary/10 border border-primary/30 text-primary font-mono text-xs tracking-wider hover:bg-primary/20 transition-colors"
+            >
+              <BookOpen className="w-3.5 h-3.5" />
+              Docs
             </Link>
           </div>
         </motion.div>
