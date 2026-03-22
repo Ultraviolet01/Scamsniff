@@ -141,22 +141,46 @@ export default function Voice() {
 
   const onDisconnect = useStableCallback((event?: unknown) => {
     const ev = event as { code?: number; reason?: string; wasClean?: boolean } | undefined;
+    const reason = ev?.reason || "";
+    const code   = ev?.code;
     log("onDisconnect fired", {
       sessionLive: sessionLiveRef.current,
       voiceState: voiceStateRef.current,
-      closeCode: ev?.code,
-      closeReason: ev?.reason || "(no reason)",
+      closeCode: code,
+      closeReason: reason || "(no reason)",
       wasClean: ev?.wasClean,
     });
 
     if (sessionLiveRef.current) {
       sessionLiveRef.current = false;
       stopMicStream();
+
+      // If the session was live and terminated unexpectedly, show a useful error
+      // rather than silently returning to idle. ElevenLabs sends reason "error"
+      // for quota exceeded (code 1002) and other server-side failures.
       if (
         voiceStateRef.current !== "idle" &&
         voiceStateRef.current !== "error"
       ) {
-        setVoiceState("idle");
+        const isQuota =
+          reason.toLowerCase().includes("quota") ||
+          reason.toLowerCase().includes("limit") ||
+          code === 1002;
+
+        if (isQuota) {
+          setVoiceState("error");
+          setErrorMsg(
+            "ElevenLabs quota exceeded. Add credits at elevenlabs.io to continue."
+          );
+        } else if (reason === "error" || reason === "") {
+          // Generic server-side error — session cut off unexpectedly
+          setVoiceState("error");
+          setErrorMsg(
+            "Voice session ended unexpectedly (server error). If this persists, your ElevenLabs quota may be exhausted — check elevenlabs.io."
+          );
+        } else {
+          setVoiceState("idle");
+        }
       }
     } else {
       log("onDisconnect ignored — session was never live (handshake artifact)");
