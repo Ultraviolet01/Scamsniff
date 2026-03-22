@@ -405,7 +405,7 @@ export default function Voice() {
   };
 
   const SUBTITLE: Record<VS, string> = {
-    idle:                 'Tap "Start Voice" to begin.',
+    idle:                 'Say something like "Check SafeMoon for me" or "Is this site legit?"',
     requesting_permission:"Requesting microphone permission...",
     connecting:           "Establishing secure voice channel...",
     listening:            "Listening — speak naturally.",
@@ -461,8 +461,9 @@ export default function Voice() {
           </p>
         </motion.div>
 
-        {/* ── Mic Orb ── */}
-        <div className="relative flex items-center justify-center">
+        {/* ── Mic Orb (tap to start / stop) ── */}
+        <div className="relative flex flex-col items-center gap-5">
+          {/* Pulse rings when active */}
           {isActive && (
             <>
               <span className="absolute w-40 h-40 rounded-full border border-primary/20 animate-ping" style={{ animationDuration: "2s" }} />
@@ -470,76 +471,84 @@ export default function Voice() {
             </>
           )}
           {isConnecting && (
-            <span className="absolute w-44 h-44 rounded-full border border-yellow-400/20 animate-ping" style={{ animationDuration: "1.4s" }} />
+            <span className="absolute w-44 h-44 rounded-full border border-primary/20 animate-ping" style={{ animationDuration: "1.4s" }} />
           )}
 
-          <div
+          {/* Orb button */}
+          <motion.button
+            type="button"
+            onClick={
+              isActive
+                ? handleStop
+                : isConnecting
+                ? handleStop
+                : isError
+                ? handleStartSession
+                : handleStartSession
+            }
             className={cn(
-              "w-28 h-28 rounded-full flex items-center justify-center border-2 shadow-2xl transition-all duration-500",
-              isActive     ? "bg-primary/30 border-primary" :
-              isConnecting ? "bg-yellow-500/20 border-yellow-500/50" :
-              isError      ? "bg-red-500/20 border-red-500/40" :
-              "bg-primary/15 border-primary/40"
+              "w-32 h-32 rounded-full flex items-center justify-center border-2 shadow-2xl transition-colors duration-700 relative overflow-hidden focus:outline-none",
+              isError
+                ? "bg-red-900/60 border-red-500/60 cursor-pointer"
+                : isActive
+                ? "bg-teal-900/70 border-cyan-400 cursor-pointer"
+                : isConnecting
+                ? "border-cyan-400 cursor-pointer"
+                : "bg-teal-900/60 border-cyan-400 cursor-pointer hover:bg-teal-800/70"
             )}
+            whileTap={{ scale: 0.94 }}
           >
-            {isConnecting ? (
-              <Activity className="w-9 h-9 text-yellow-400 animate-spin" />
-            ) : voiceState === "speaking" ? (
-              <Volume2 className="w-9 h-9 text-primary animate-pulse" />
-            ) : voiceState === "processing" ? (
-              <Activity className="w-9 h-9 text-primary animate-spin" />
-            ) : isError ? (
-              <AlertTriangle className="w-9 h-9 text-red-400" />
-            ) : voiceState === "listening" ? (
-              <Mic className="w-9 h-9 text-primary animate-pulse" />
-            ) : (
-              <Mic className="w-9 h-9 text-primary/60" />
+            {/* Connecting: animated amber/teal background wash */}
+            {isConnecting && (
+              <motion.span
+                className="absolute inset-0 rounded-full"
+                animate={{ backgroundColor: ["#0f2d2d", "#3d2600", "#0f2d2d"] }}
+                transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
+              />
             )}
 
+            {/* Icon */}
+            <span className="relative z-10">
+              {isConnecting ? (
+                <Activity className="w-10 h-10 text-orange-400" />
+              ) : voiceState === "speaking" ? (
+                <Volume2 className="w-10 h-10 text-cyan-400 animate-pulse" />
+              ) : voiceState === "processing" ? (
+                <Activity className="w-10 h-10 text-cyan-400 animate-spin" />
+              ) : isError ? (
+                <AlertTriangle className="w-10 h-10 text-red-400" />
+              ) : voiceState === "listening" ? (
+                <Mic className="w-10 h-10 text-cyan-400" />
+              ) : (
+                <Mic className="w-10 h-10 text-cyan-400/80" />
+              )}
+            </span>
+
+            {/* Listening waveform bars */}
             {voiceState === "listening" && (
-              <div className="absolute bottom-3.5 left-1/2 -translate-x-1/2 flex gap-0.5 items-end h-3">
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-0.5 items-end h-3 z-10">
                 {[...Array(5)].map((_, i) => (
                   <motion.span
                     key={i}
-                    className="w-0.5 bg-primary rounded-full"
+                    className="w-0.5 bg-cyan-400 rounded-full"
                     animate={{ height: ["3px", "12px", "3px"] }}
                     transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.1 }}
                   />
                 ))}
               </div>
             )}
-          </div>
-        </div>
+          </motion.button>
 
-        {/* ── Control Buttons ── */}
-        <div className="flex flex-wrap items-center justify-center gap-3">
-          {isActive ? (
-            <button
-              type="button"
-              onClick={handleStop}
-              className="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-red-500/50 bg-red-500/10 font-mono text-sm text-red-400 hover:bg-red-500/20 transition-all"
-            >
-              <Mic className="w-4 h-4" />
-              End Session
-            </button>
-          ) : !isConnecting ? (
-            <button
-              type="button"
-              onClick={handleStartSession}
-              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-mono text-sm font-bold shadow-[0_0_20px_rgba(0,255,255,0.2)] hover:shadow-[0_0_28px_rgba(0,255,255,0.35)] transition-all"
-            >
-              <Mic className="w-4 h-4" />
-              Start Voice
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleStop}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border/50 bg-card/40 font-mono text-xs text-muted-foreground hover:text-foreground transition-all"
-            >
-              Cancel
-            </button>
-          )}
+          {/* Caption below orb */}
+          <p className="font-mono text-xs text-muted-foreground/50 tracking-wide">
+            {isActive
+              ? "Tap to end session"
+              : isConnecting
+              ? "Tap to cancel"
+              : isError
+              ? "Tap to retry"
+              : "Tap to start voice session"}
+          </p>
         </div>
 
         {/* ── Error Card ── */}
