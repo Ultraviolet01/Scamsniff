@@ -320,6 +320,17 @@ export default function Home() {
 
   return (
     <div className="min-h-screen w-full relative bg-background">
+      {/* Docs button — top right */}
+      <div className="fixed top-4 right-4 z-50">
+        <Link
+          href="/docs"
+          className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-card/70 border border-primary/30 text-primary font-mono text-xs tracking-wider hover:bg-primary/10 hover:border-primary/60 backdrop-blur-md transition-all shadow-[0_0_12px_rgba(0,255,255,0.08)]"
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          Docs
+        </Link>
+      </div>
+
       {/* Ambient glow */}
       <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
         <div className="absolute top-0 left-1/4 w-[700px] h-[500px] bg-primary/4 rounded-full blur-[140px]" />
@@ -344,20 +355,13 @@ export default function Home() {
           <p className="text-muted-foreground text-base md:text-lg font-mono max-w-xl mx-auto leading-relaxed">
             On-chain threat intelligence for crypto projects, tokens, URLs, and X accounts.
           </p>
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+          <div className="mt-4">
             <Link
               href="/voice"
               className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-accent/10 border border-accent/30 text-accent font-mono text-xs tracking-wider hover:bg-accent/20 transition-colors"
             >
               <Mic className="w-3.5 h-3.5" />
               Try Voice Mode
-            </Link>
-            <Link
-              href="/docs"
-              className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary/10 border border-primary/30 text-primary font-mono text-xs tracking-wider hover:bg-primary/20 transition-colors"
-            >
-              <BookOpen className="w-3.5 h-3.5" />
-              Docs
             </Link>
           </div>
         </motion.div>
