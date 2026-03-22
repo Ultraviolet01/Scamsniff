@@ -83,10 +83,22 @@ localPort = 8081
 externalPort = 8081
 
 [[ports]]
+localPort = 8082
+externalPort = 6800
+
+[[ports]]
 localPort = 25631
 externalPort = 3001
+
+[[ports]]
+localPort = 25632
+externalPort = 6000
 
 [deployment]
 deploymentTarget = "autoscale"
 run = ["bash", "Crypto-Risk-Analyzer/scripts/start.sh"]
 build = ["bash", "Crypto-Risk-Analyzer/scripts/build.sh"]
+
+[postMerge]
+path = "Crypto-Risk-Analyzer/scripts/post-merge.sh"
+timeoutMs = 180000
