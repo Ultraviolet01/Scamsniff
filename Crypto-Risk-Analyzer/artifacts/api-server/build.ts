@@ -11,7 +11,9 @@ const __dirname = path.dirname(__filename);
 // packages that are not bundle compatible
 const allowlist = [
   "@google/generative-ai",
+  "@mendable/firecrawl-js",
   "axios",
+  "elevenlabs",
   "connect-pg-simple",
   "cors",
   "date-fns",
