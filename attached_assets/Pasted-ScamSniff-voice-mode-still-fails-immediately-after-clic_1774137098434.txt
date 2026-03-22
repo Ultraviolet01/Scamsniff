@@ -1,0 +1,85 @@
+ScamSniff voice mode still fails immediately after clicking the mic button.
+
+I do NOT want another light patch. I want a full isolation and rebuild of the voice start flow.
+
+Current symptom:
+- I click mic
+- it instantly returns back
+- I cannot speak
+- it does not stay in listening mode
+
+Please do these exact things:
+
+1. Remove dependency on the current voice startup flow and rebuild the startup logic from scratch.
+
+2. First create a standalone microphone test before any ElevenLabs connection:
+- add a temporary “Test Microphone” button
+- when clicked, run only:
+  `navigator.mediaDevices.getUserMedia({ audio: true })`
+- if successful:
+  - show “Microphone access granted”
+  - keep the stream active for 10 seconds
+  - display audio track status
+- if failed:
+  - show the exact error message on screen
+  - log the full error to console
+
+3. After the standalone microphone test works, only then connect ElevenLabs.
+Split the flow into two separate steps:
+- Step 1: get microphone access
+- Step 2: start/connect the ElevenLabs conversation session
+
+4. Add visible debug output on screen:
+- secure context: true/false
+- mediaDevices available: true/false
+- current state
+- last error
+- microphone permission result
+- session connection result
+
+5. Add console logs for every step:
+- mic button clicked
+- checking secure context
+- requesting getUserMedia
+- getUserMedia success/failure
+- starting ElevenLabs session
+- ElevenLabs session connected
+- listening started
+- error occurred
+- cleanup called
+- state reset called
+
+6. Prevent accidental reset causes:
+- ensure mic button has type="button"
+- ensure it is not inside a form submit flow
+- ensure no route change, modal close, or parent rerender closes the component
+- ensure cleanup is NOT called immediately after startup
+- ensure useEffect cleanup is not firing because of changing dependencies
+
+7. Build a strict state machine with these states only:
+- idle
+- mic_testing
+- requesting_permission
+- mic_ready
+- connecting
+- listening
+- processing
+- speaking
+- error
+
+8. Important:
+Do not return to idle automatically after click unless:
+- user manually closes it
+- a fatal error occurs
+- a full successful session completes
+
+9. Add a temporary “Bypass ElevenLabs” mode:
+- after mic access succeeds, stay in listening state without connecting to ElevenLabs
+- this will confirm whether the instant reset is caused by the mic layer or the ElevenLabs layer
+
+10. After implementing, explain:
+- whether the bug was from browser permission, insecure origin, form submission, state reset, cleanup, or ElevenLabs connection
+- the exact file and function where it happened
+- the final stable startup flow
+
+Please generate the exact code changes, not just suggestions.

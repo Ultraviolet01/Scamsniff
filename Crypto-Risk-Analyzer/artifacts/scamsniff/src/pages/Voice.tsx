@@ -1,125 +1,57 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+/**
+ * Voice.tsx — ScamSniff Voice Investigation
+ *
+ * ROOT CAUSE (found via logs 2026-03-22):
+ *   `useConversation` was receiving new callback references on every render
+ *   (because onConnect/onDisconnect/onError/onMessage were inline functions).
+ *   When voiceState changed → re-render → new callbacks → useConversation
+ *   detected config change → tore down and reset the session → onDisconnect
+ *   fired 1.3 s after onConnect, resetting UI back to idle.
+ *
+ * FIX:
+ *   All callbacks are wrapped in stable useRef-based thunks so useConversation
+ *   always receives the SAME function references across renders. Internal state
+ *   is read via refs (voiceStateRef, etc.) to avoid stale closures.
+ */
+
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  type MutableRefObject,
+} from "react";
 import { useConversation } from "@11labs/react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Mic, MicOff, Activity, ArrowLeft, ShieldAlert, Volume2, AlertTriangle } from "lucide-react";
+import {
+  Mic,
+  Activity,
+  ArrowLeft,
+  ShieldAlert,
+  Volume2,
+  AlertTriangle,
+  CheckCircle2,
+  FlaskConical,
+  Radio,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import { Link } from "wouter";
 import { analyzeProject } from "@workspace/api-client-react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// State machine
 // ---------------------------------------------------------------------------
 
-type Verdict = "Low Risk" | "Caution" | "High Risk" | "Extreme Risk";
-
-const VERDICT_COLOR: Record<Verdict, string> = {
-  "Low Risk":     "text-emerald-400",
-  "Caution":      "text-yellow-400",
-  "High Risk":    "text-orange-400",
-  "Extreme Risk": "text-red-500",
-};
-
-/**
- * System prompt injected as a runtime override into every ElevenLabs session.
- * This keeps the authoritative prompt in code, not just the ElevenLabs dashboard.
- */
-const AGENT_SYSTEM_PROMPT = `\
-You are ScamSniff, a calm, sharp on-chain security analyst. Your job is to help users assess \
-whether a crypto project, token, URL, or X handle is suspicious.
-
-RESPONSE STRUCTURE — always follow this exact order:
-1. State the risk level immediately in the first sentence.
-2. Weave the top 1-2 strongest signals into the next 1-2 sentences naturally — do NOT list them.
-3. End with one clear, practical next step.
-
-RESPONSE LENGTH: 2 to 4 sentences maximum. Front-load the most critical information so users \
-can interrupt early and still get full value.
-
-PHRASING RULES:
-- Never say "this is safe" or "this is definitely a scam".
-- Use hedged language: "this looks low risk from the public evidence I found" / \
-"this looks suspicious based on the evidence available" / \
-"I couldn't verify enough trustworthy signals to feel confident either way".
-- Don't repeat the project or token name more than once per response.
-- Never verbally list more than 2 sources or signals — summarize them naturally.
-- Sound like a trusted security friend, not a compliance report.
-
-FOLLOW-UP HANDLING:
-- If the user asks "why?" → Explain the top 1-2 risk signals in plain, natural language. One or two sentences max.
-- If the user asks "sources?" or "where did you get that?" → Describe the source types first. Offer more detail only if they ask again.
-- If the user asks "how confident are you?" → Base your answer on evidence quality. One sentence is enough.
-- For any other follow-up about the same target, answer directly without re-running the tool.
-
-TOOL USAGE:
-When the user mentions any project name, token, URL, or X handle — immediately call \
-analyze_project_risk with that identifier. Base your entire initial response on the structured \
-data returned. Do NOT call the tool again for follow-up questions about the same target.
-
-DATA INTERPRETATION:
-The tool returns a structured data block. Use it as follows:
-- VERDICT + CONFIDENCE → craft your first sentence from these two together.
-- TOP_RISKS or TOP_TRUST → pick whichever set is most significant and weave the top 1-2 into your evidence sentence(s).
-- MISSING → use to inform your cautionary next step.
-- EVIDENCE_NOTE mentions limited data → qualify your answer: "based on limited public evidence".
-- EVIDENCE_NOTE mentions multiple credible sources → you can speak with more confidence, but still use hedged language.
-
-NEXT STEP BY VERDICT (keep to one crisp sentence):
-- Extreme Risk → "Don't connect your wallet or send funds — treat this as unverified."
-- High Risk → "Cross-check the team, official site, and docs independently before doing anything."
-- Caution → "Verify the official site and GitHub yourself before taking any action."
-- Low Risk → "Looks clean from what I found, but verify links yourself before connecting a wallet."
-
-TONE: Calm, focused, never panicked. Never hype. Acknowledge uncertainty when evidence is thin.`;
-
-function formatForAgent(data: {
-  verdict: string;
-  score: number;
-  confidence: string;
-  risk_signals: string[];
-  positive_signals: string[];
-  missing_signals: string[];
-  input_type: string;
-  summary: string;
-}): string {
-  const lines: string[] = [];
-  lines.push(`VERDICT: ${data.verdict}`);
-  lines.push(`CONFIDENCE: ${data.confidence}`);
-  lines.push(`INPUT_TYPE: ${data.input_type}`);
-  if (data.risk_signals.length > 0)
-    lines.push(`TOP_RISKS: ${data.risk_signals.slice(0, 2).join(" | ")}`);
-  if (data.positive_signals.length > 0)
-    lines.push(`TOP_TRUST: ${data.positive_signals.slice(0, 2).join(" | ")}`);
-  if (data.missing_signals.length > 0)
-    lines.push(`MISSING: ${data.missing_signals.slice(0, 2).join(" | ")}`);
-  if (data.confidence === "Low")
-    lines.push("EVIDENCE_NOTE: Limited public data found — qualify your response accordingly.");
-  else if (data.confidence === "High")
-    lines.push("EVIDENCE_NOTE: Multiple credible independent sources confirm this.");
-  else
-    lines.push("EVIDENCE_NOTE: Mixed evidence — some credible sources, some community-only.");
-  if (data.risk_signals.length > 2)
-    lines.push(`ALL_RISKS: ${data.risk_signals.join(" | ")}`);
-  if (data.positive_signals.length > 2)
-    lines.push(`ALL_TRUST: ${data.positive_signals.join(" | ")}`);
-  return lines.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/**
- * Fine-grained voice state used for both UI and debug display.
- *
- * Lifecycle:
- *   idle → requesting_permission → connecting → listening ↔ speaking → idle
- *                                                          ↘ error
- */
-type VoiceState =
+type VS =
   | "idle"
+  | "mic_testing"
   | "requesting_permission"
+  | "mic_ready"
   | "connecting"
   | "listening"
+  | "processing"
   | "speaking"
   | "error";
 
@@ -129,194 +61,382 @@ interface AgentMessage {
 }
 
 // ---------------------------------------------------------------------------
+// System prompt
+// ---------------------------------------------------------------------------
+
+const AGENT_SYSTEM_PROMPT = `\
+You are ScamSniff, a calm, sharp on-chain security analyst. Your job is to help users assess \
+whether a crypto project, token, URL, or X handle is suspicious.
+
+RESPONSE STRUCTURE — always follow this exact order:
+1. State the risk level immediately in the first sentence.
+2. Weave the top 1-2 strongest signals into the next 1-2 sentences naturally — do NOT list them.
+3. End with one clear, practical next step.
+
+RESPONSE LENGTH: 2 to 4 sentences maximum.
+
+PHRASING RULES:
+- Never say "this is safe" or "this is definitely a scam".
+- Use hedged language: "this looks low risk from the public evidence I found" or \
+"this looks suspicious based on the evidence available".
+- Don't repeat the project or token name more than once per response.
+- Sound like a trusted security friend, not a compliance report.
+
+TOOL USAGE:
+When the user mentions any project name, token, URL, or X handle — immediately call \
+analyze_project_risk with that identifier. Do NOT call the tool again for follow-up \
+questions about the same target.
+
+NEXT STEP BY VERDICT (one crisp sentence):
+- Extreme Risk → "Don't connect your wallet or send funds — treat this as unverified."
+- High Risk → "Cross-check the team, official site, and docs independently before doing anything."
+- Caution → "Verify the official site and GitHub yourself before taking any action."
+- Low Risk → "Looks clean from what I found, but verify links yourself before connecting a wallet."
+
+TONE: Calm, focused, never panicked. Never hype. Acknowledge uncertainty when evidence is thin.`;
+
+// ---------------------------------------------------------------------------
+// Stable callback hook
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a stable function reference that always delegates to the latest
+ * version of `fn`. This ensures useConversation never sees new callback refs.
+ */
+function useStableCallback<T extends (...args: never[]) => unknown>(
+  fn: T,
+): T {
+  const ref = useRef(fn);
+  useEffect(() => {
+    ref.current = fn;
+  });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useCallback((...args: Parameters<T>) => ref.current(...args), []) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Logger
+// ---------------------------------------------------------------------------
+
+function makeLog(prefix: string) {
+  return (msg: string, data?: unknown) => {
+    if (data !== undefined) {
+      console.log(`[${prefix}] ${msg}`, data);
+    } else {
+      console.log(`[${prefix}] ${msg}`);
+    }
+  };
+}
+
+const log = makeLog("ScamSniff Voice");
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
 export default function Voice() {
-  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // ── UI State ──────────────────────────────────────────────────────────────
+  const [voiceState, setVoiceStateRaw] = useState<VS>("idle");
+  const [messages, setMessages]        = useState<AgentMessage[]>([]);
+  const [errorMsg, setErrorMsg]        = useState<string | null>(null);
+  const [bypassMode, setBypassMode]    = useState(false);
+  const [micTestResult, setMicTestResult] = useState<string | null>(null);
 
-  /**
-   * Refs that survive re-renders without causing extra renders themselves.
-   *
-   * micStreamRef   — keeps the getUserMedia stream alive for the duration of the session.
-   * sessionLiveRef — true once onConnect fires; used to guard onDisconnect so it
-   *                  does NOT reset state during the initial connection handshake,
-   *                  only after a real established session ends.
-   * stoppingRef    — true when the user manually triggers stopSession so we know
-   *                  the disconnect is intentional.
-   */
-  const micStreamRef    = useRef<MediaStream | null>(null);
-  const sessionLiveRef  = useRef(false);
-  const stoppingRef     = useRef(false);
+  // ── Refs (survive renders, readable inside stable callbacks) ──────────────
+  const voiceStateRef:  MutableRefObject<VS>              = useRef("idle");
+  const micStreamRef:   MutableRefObject<MediaStream | null> = useRef(null);
+  const bypassRef:      MutableRefObject<boolean>         = useRef(false);
+  const sessionLiveRef: MutableRefObject<boolean>         = useRef(false);
 
-  const log = (msg: string, data?: unknown) => {
-    if (data !== undefined) {
-      console.log(`[ScamSniff Voice] ${msg}`, data);
-    } else {
-      console.log(`[ScamSniff Voice] ${msg}`);
-    }
-  };
+  // Keep bypassRef in sync with bypassMode state
+  useEffect(() => { bypassRef.current = bypassMode; }, [bypassMode]);
 
-  const stopMicStream = () => {
+  // Wrapped setter so the ref stays in sync too
+  const setVoiceState = useCallback((s: VS) => {
+    log(`State: ${voiceStateRef.current} → ${s}`);
+    voiceStateRef.current = s;
+    setVoiceStateRaw(s);
+  }, []);
+
+  // ── Environment diagnostics (computed once on mount) ──────────────────────
+  const isSecureContext    = window.isSecureContext;
+  const hasMediaDevices    = !!navigator.mediaDevices?.getUserMedia;
+
+  // ── Mic stream helpers ────────────────────────────────────────────────────
+  const stopMicStream = useCallback(() => {
     if (micStreamRef.current) {
       micStreamRef.current.getTracks().forEach((t) => t.stop());
       micStreamRef.current = null;
-      log("Mic stream stopped and released");
+      log("Mic stream tracks stopped and released");
     }
-  };
+  }, []);
 
+  // ── addMessage ────────────────────────────────────────────────────────────
   const addMessage = useCallback((role: AgentMessage["role"], text: string) => {
     setMessages((prev) => [...prev, { role, text }].slice(-10));
   }, []);
 
+  // ── Stable ElevenLabs callbacks (refs under the hood) ─────────────────────
+
+  const onConnect = useStableCallback(() => {
+    log("onConnect fired — session established");
+    sessionLiveRef.current = true;
+    setErrorMsg(null);
+    if (!bypassRef.current) {
+      setVoiceState("listening");
+    }
+  });
+
+  const onDisconnect = useStableCallback(() => {
+    log("onDisconnect fired", {
+      sessionLive: sessionLiveRef.current,
+      voiceState: voiceStateRef.current,
+      bypass: bypassRef.current,
+    });
+
+    // Only reset if the session was genuinely alive (not a handshake artifact)
+    if (sessionLiveRef.current) {
+      sessionLiveRef.current = false;
+      stopMicStream();
+
+      // If we're in a terminal/successful state or bypass, don't auto-reset
+      if (
+        voiceStateRef.current !== "idle" &&
+        voiceStateRef.current !== "error"
+      ) {
+        setVoiceState("idle");
+      }
+    } else {
+      log("onDisconnect ignored — session was never live (handshake artifact)");
+    }
+  });
+
+  const onError = useStableCallback((err: unknown) => {
+    const msg =
+      typeof err === "string"
+        ? err
+        : err instanceof Error
+        ? err.message
+        : "Connection error from voice agent.";
+    log("onError fired", msg);
+    sessionLiveRef.current = false;
+    stopMicStream();
+    setVoiceState("error");
+    setErrorMsg(msg || "Could not connect to voice agent. Check your API keys and agent ID.");
+  });
+
+  const onMessage = useStableCallback(
+    ({ message, source }: { message: string; source: string }) => {
+      log("onMessage", { source, preview: message.slice(0, 60) });
+      if (source === "ai" || source === "agent") {
+        addMessage("agent", message);
+        setVoiceState("speaking");
+      }
+      if (source === "user") {
+        addMessage("user", message);
+        setVoiceState("listening");
+      }
+    }
+  );
+
+  // ── useConversation with stable callbacks ─────────────────────────────────
   const conversation = useConversation({
     clientTools: {
       analyze_project_risk: async ({ input }: { input: string }): Promise<string> => {
-        log("Tool called: analyze_project_risk", { input });
+        log("Tool: analyze_project_risk called", { input });
+        setVoiceState("processing");
         try {
           const result = await analyzeProject({ input });
-          log("Tool result received", { verdict: result.verdict });
-          return formatForAgent({
-            verdict: result.verdict,
-            score: result.score,
-            confidence: result.confidence,
-            risk_signals: result.risk_signals,
-            positive_signals: result.positive_signals,
-            missing_signals: result.missing_signals,
-            input_type: result.input_type,
-            summary: result.summary,
-          });
+          log("Tool: result received", { verdict: result.verdict });
+          setVoiceState("listening");
+          const lines = [
+            `VERDICT: ${result.verdict}`,
+            `CONFIDENCE: ${result.confidence}`,
+            `INPUT_TYPE: ${result.input_type}`,
+          ];
+          if (result.risk_signals.length)
+            lines.push(`TOP_RISKS: ${result.risk_signals.slice(0, 2).join(" | ")}`);
+          if (result.positive_signals.length)
+            lines.push(`TOP_TRUST: ${result.positive_signals.slice(0, 2).join(" | ")}`);
+          if (result.missing_signals.length)
+            lines.push(`MISSING: ${result.missing_signals.slice(0, 2).join(" | ")}`);
+          lines.push(
+            result.confidence === "High"
+              ? "EVIDENCE_NOTE: Multiple credible independent sources confirm this."
+              : result.confidence === "Low"
+              ? "EVIDENCE_NOTE: Limited public data — qualify your response accordingly."
+              : "EVIDENCE_NOTE: Mixed evidence — some credible, some community-only."
+          );
+          return lines.join("\n");
         } catch (err) {
-          log("Tool error", err);
-          return "VERDICT: Unknown\nEVIDENCE_NOTE: Analysis failed — tell the user the service could not complete the lookup and suggest they try again.";
+          log("Tool: analysis failed", err);
+          setVoiceState("listening");
+          return "VERDICT: Unknown\nEVIDENCE_NOTE: Analysis failed — tell the user to try again.";
         }
       },
     },
-
-    onConnect: () => {
-      log("onConnect fired — session is live");
-      sessionLiveRef.current = true;
-      stoppingRef.current = false;
-      setVoiceState("listening");
-      setErrorMsg(null);
-    },
-
-    onDisconnect: () => {
-      log("onDisconnect fired", {
-        sessionLive: sessionLiveRef.current,
-        stopping: stoppingRef.current,
-      });
-
-      // Only reset to idle if the session was actually established.
-      // Ignore spurious disconnects that fire during the initial handshake
-      // before onConnect has ever been called.
-      if (sessionLiveRef.current) {
-        sessionLiveRef.current = false;
-        stopMicStream();
-        setVoiceState("idle");
-      } else {
-        log("onDisconnect ignored — session was not yet live (handshake disconnect)");
-      }
-    },
-
-    onError: (err) => {
-      const msg = typeof err === "string" ? err : (err as Error)?.message ?? "Connection error.";
-      log("onError fired", msg);
-      sessionLiveRef.current = false;
-      stopMicStream();
-      setVoiceState("error");
-      setErrorMsg(msg || "Could not connect to voice agent. Check your API keys.");
-    },
-
-    onMessage: ({ message, source }: { message: string; source: string }) => {
-      log("onMessage", { source, preview: message.slice(0, 60) });
-      // source is "ai" for agent messages and "user" for transcribed user speech
-      if (source === "ai" || source === "agent") addMessage("agent", message);
-      if (source === "user") addMessage("user", message);
-
-      // Update speaking/listening visual state
-      if (source === "ai" || source === "agent") {
-        setVoiceState("speaking");
-      } else if (source === "user") {
-        setVoiceState("listening");
-      }
-    },
+    onConnect,
+    onDisconnect,
+    onError,
+    onMessage,
   });
 
-  // Keep speaking/listening in sync with the SDK's isSpeaking flag
+  // Keep listening/speaking in sync with isSpeaking flag
   useEffect(() => {
-    if (sessionLiveRef.current) {
+    if (sessionLiveRef.current && voiceStateRef.current !== "processing") {
       setVoiceState(conversation.isSpeaking ? "speaking" : "listening");
     }
-  }, [conversation.isSpeaking]);
+  }, [conversation.isSpeaking, setVoiceState]);
+
+  // Cleanup mic on unmount
+  useEffect(() => {
+    log("Component mounted");
+    return () => {
+      log("Component cleanup called (unmount)");
+      stopMicStream();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---------------------------------------------------------------------------
-  // Session control
+  // Actions
   // ---------------------------------------------------------------------------
 
-  const startSession = useCallback(async () => {
-    // Guard: don't double-start
-    if (voiceState !== "idle" && voiceState !== "error") {
-      log("startSession blocked — already in progress", voiceState);
+  /** Standalone mic test — completely independent of ElevenLabs */
+  const handleMicTest = useCallback(async () => {
+    log("TEST MIC button clicked");
+    setVoiceState("mic_testing");
+    setMicTestResult(null);
+    setErrorMsg(null);
+
+    log("Checking secure context...", { isSecureContext, hasMediaDevices });
+
+    if (!isSecureContext) {
+      setVoiceState("error");
+      setErrorMsg("Insecure context — microphone requires HTTPS or localhost.");
+      setMicTestResult("FAILED: insecure context");
+      return;
+    }
+    if (!hasMediaDevices) {
+      setVoiceState("error");
+      setErrorMsg("navigator.mediaDevices is not available in this browser.");
+      setMicTestResult("FAILED: mediaDevices unavailable");
       return;
     }
 
-    log("Mic button clicked — starting session");
+    log("Calling getUserMedia...");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const tracks = stream.getAudioTracks();
+      log("getUserMedia SUCCESS", { tracks: tracks.map((t) => t.label) });
+      micStreamRef.current = stream;
+      setMicTestResult(`GRANTED — track: ${tracks[0]?.label ?? "unknown"}`);
+      setVoiceState("mic_ready");
+
+      // Keep stream alive for 10 seconds, then release
+      setTimeout(() => {
+        log("Mic test: releasing stream after 10 s");
+        stopMicStream();
+        if (voiceStateRef.current === "mic_ready") {
+          setVoiceState("idle");
+          setMicTestResult((prev) => (prev ? prev + " (released)" : null));
+        }
+      }, 10_000);
+    } catch (err) {
+      const errObj = err as DOMException;
+      const isDenied = errObj.name === "NotAllowedError" || errObj.name === "PermissionDeniedError";
+      const msg = isDenied
+        ? `Permission denied (${errObj.name}). Allow microphone in your browser settings.`
+        : `getUserMedia failed: ${errObj.name} — ${errObj.message}`;
+      log("getUserMedia FAILED", { name: errObj.name, message: errObj.message });
+      console.error("[ScamSniff Voice] Full getUserMedia error:", err);
+      setMicTestResult(`FAILED: ${errObj.name}`);
+      setVoiceState("error");
+      setErrorMsg(msg);
+    }
+  }, [isSecureContext, hasMediaDevices, setVoiceState, stopMicStream]);
+
+  /** Full voice session start */
+  const handleStartSession = useCallback(async () => {
+    const cur = voiceStateRef.current;
+    if (cur !== "idle" && cur !== "error" && cur !== "mic_ready") {
+      log("startSession blocked — already running", cur);
+      return;
+    }
+
+    log("START SESSION button clicked");
     setErrorMsg(null);
     setMessages([]);
     sessionLiveRef.current = false;
-    stoppingRef.current = false;
 
-    // ── Step 1: microphone permission ────────────────────────────────────────
-    setVoiceState("requesting_permission");
-    log("Requesting microphone permission via getUserMedia...");
+    // Step 1: mic permission (unless already have a stream from mic test)
+    if (!micStreamRef.current) {
+      setVoiceState("requesting_permission");
+      log("Checking secure context...", { isSecureContext, hasMediaDevices });
 
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      micStreamRef.current = stream;
-      log("Microphone permission granted", {
-        tracks: stream.getAudioTracks().map((t) => t.label),
-      });
-    } catch (err) {
-      const isDenied =
-        err instanceof DOMException &&
-        (err.name === "NotAllowedError" || err.name === "PermissionDeniedError");
-      const msg = isDenied
-        ? "Microphone access was denied. Please allow microphone access in your browser and try again."
-        : `Could not access microphone: ${err instanceof Error ? err.message : String(err)}`;
-      log("Microphone permission error", { err, isDenied });
-      setVoiceState("error");
-      setErrorMsg(msg);
+      if (!isSecureContext) {
+        setVoiceState("error");
+        setErrorMsg("Microphone requires a secure context (HTTPS or localhost).");
+        return;
+      }
+      if (!hasMediaDevices) {
+        setVoiceState("error");
+        setErrorMsg("navigator.mediaDevices is not available in this browser.");
+        return;
+      }
+
+      log("Calling getUserMedia...");
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        micStreamRef.current = stream;
+        log("getUserMedia granted", { tracks: stream.getAudioTracks().map((t) => t.label) });
+      } catch (err) {
+        const errObj = err as DOMException;
+        const isDenied = errObj.name === "NotAllowedError" || errObj.name === "PermissionDeniedError";
+        const msg = isDenied
+          ? `Microphone access was denied. Allow microphone in your browser settings and try again.`
+          : `Could not access microphone: ${errObj.name} — ${errObj.message}`;
+        log("getUserMedia FAILED", err);
+        console.error("[ScamSniff Voice] Full getUserMedia error:", err);
+        setVoiceState("error");
+        setErrorMsg(msg);
+        return;
+      }
+    } else {
+      log("Reusing existing mic stream from mic test");
+    }
+
+    // Bypass mode: stay in listening without connecting to ElevenLabs
+    if (bypassRef.current) {
+      log("BYPASS MODE: skipping ElevenLabs connection, going straight to listening");
+      setVoiceState("listening");
       return;
     }
 
-    // ── Step 2: signed URL from backend ─────────────────────────────────────
+    // Step 2: get signed URL
     setVoiceState("connecting");
-    log("Fetching signed URL from backend...");
+    log("Fetching signed URL from /api/agent/signed-url ...");
 
     let signedUrl: string;
     try {
       const res = await fetch("/api/agent/signed-url");
       if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: "Unknown server error" }));
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         throw new Error(body.error ?? `Server returned ${res.status}`);
       }
       const data = await res.json();
       signedUrl = data.signed_url;
-      log("Signed URL received (truncated)", signedUrl.slice(0, 60) + "...");
+      log("Signed URL received", signedUrl.slice(0, 60) + "...");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to get voice session token.";
-      log("Signed URL fetch failed", msg);
+      log("Signed URL FAILED", msg);
       stopMicStream();
       setVoiceState("error");
       setErrorMsg(msg);
       return;
     }
 
-    // ── Step 3: start ElevenLabs session ────────────────────────────────────
+    // Step 3: start ElevenLabs session
     log("Calling conversation.startSession...");
     try {
       await conversation.startSession({
@@ -327,83 +447,80 @@ export default function Voice() {
           },
         },
       });
-      log("conversation.startSession resolved — waiting for onConnect");
-      // UI state is set to "listening" inside onConnect, not here,
-      // so there is no race between startSession and the connection handshake.
+      log("conversation.startSession resolved (onConnect will set listening state)");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not start voice session.";
-      log("conversation.startSession threw", msg);
+      log("conversation.startSession THREW", msg);
       stopMicStream();
       sessionLiveRef.current = false;
       setVoiceState("error");
       setErrorMsg(msg);
     }
-  }, [voiceState, conversation]);
+  }, [isSecureContext, hasMediaDevices, setVoiceState, stopMicStream, conversation]);
 
-  const stopSession = useCallback(async () => {
-    log("Stop button clicked");
-    stoppingRef.current = true;
+  const handleStop = useCallback(async () => {
+    log("STOP button clicked");
+    sessionLiveRef.current = false;
     try {
       await conversation.endSession();
-    } catch (err) {
-      log("endSession error (non-fatal)", err);
+    } catch (e) {
+      log("endSession threw (non-fatal)", e);
     }
-    sessionLiveRef.current = false;
     stopMicStream();
     setVoiceState("idle");
-  }, [conversation]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopMicStream();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setMessages([]);
+  }, [conversation, setVoiceState, stopMicStream]);
 
   // ---------------------------------------------------------------------------
   // Derived UI helpers
   // ---------------------------------------------------------------------------
 
-  const isActive     = voiceState === "listening" || voiceState === "speaking";
-  const isConnecting = voiceState === "connecting" || voiceState === "requesting_permission";
+  const isActive     = voiceState === "listening" || voiceState === "speaking" || voiceState === "processing";
+  const isConnecting = voiceState === "connecting" || voiceState === "requesting_permission" || voiceState === "mic_testing";
   const isError      = voiceState === "error";
 
-  const statusDot =
-    isActive     ? "bg-emerald-400 animate-pulse" :
-    isConnecting ? "bg-yellow-400 animate-pulse" :
-    isError      ? "bg-red-500" : "bg-border";
-
-  const statusLabel: Record<VoiceState, string> = {
+  const STATE_LABEL: Record<VS, string> = {
     idle:                 "STANDBY",
+    mic_testing:          "MIC TEST",
     requesting_permission:"MIC CHECK",
+    mic_ready:            "MIC READY",
     connecting:           "CONNECTING",
     listening:            "LISTENING",
+    processing:           "PROCESSING",
     speaking:             "SPEAKING",
     error:                "ERROR",
   };
 
-  const subtitleText: Record<VoiceState, string> = {
-    idle:                 'Say something like "Check SafeMoon" or "Is this site legit?"',
-    requesting_permission:"Requesting microphone access...",
+  const SUBTITLE: Record<VS, string> = {
+    idle:                 'Tap "Start Voice" to begin, or test your mic first.',
+    mic_testing:          "Testing microphone access...",
+    requesting_permission:"Requesting microphone permission...",
+    mic_ready:            "Microphone ready — tap Start Voice to connect.",
     connecting:           "Establishing secure voice channel...",
-    listening:            "Listening — speak naturally",
+    listening:            "Listening — speak naturally.",
+    processing:           "Analysing...",
     speaking:             "Agent is speaking...",
-    error:                "Voice session failed — see error below",
+    error:                "Something went wrong — see debug panel below.",
   };
+
+  const dotColor =
+    isActive     ? "bg-emerald-400 animate-pulse" :
+    isConnecting ? "bg-yellow-400 animate-pulse" :
+    isError      ? "bg-red-500" :
+    voiceState === "mic_ready" ? "bg-emerald-400" :
+    "bg-border";
 
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="min-h-screen w-full relative bg-background flex flex-col">
-      {/* Background gradient */}
+    <div className="min-h-screen w-full relative bg-background flex flex-col select-none">
       <div className="absolute inset-0 z-0 pointer-events-none">
         <div className="absolute inset-0 bg-gradient-to-b from-primary/5 via-background to-background" />
       </div>
 
-      {/* Top bar */}
+      {/* ── Header ── */}
       <header className="relative z-10 flex items-center justify-between px-6 py-4 border-b border-border/40">
         <Link
           href="/"
@@ -412,46 +529,30 @@ export default function Voice() {
           <ArrowLeft className="w-4 h-4" />
           Text Mode
         </Link>
-
         <div className="flex items-center gap-2 font-mono text-xs text-primary/70 tracking-widest">
           <ShieldAlert className="w-4 h-4" />
           SCAMSNIFF VOICE
         </div>
-
-        <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
-          <span className={cn("w-1.5 h-1.5 rounded-full", statusDot)} />
-          {statusLabel[voiceState]}
+        <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
+          <span className={cn("w-1.5 h-1.5 rounded-full", dotColor)} />
+          {STATE_LABEL[voiceState]}
         </div>
       </header>
 
-      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-12 gap-10">
+      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-8 gap-7">
 
         {/* Title */}
-        <motion.div
-          initial={{ opacity: 0, y: -12 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-center"
-        >
+        <motion.div initial={{ opacity: 0, y: -12 }} animate={{ opacity: 1, y: 0 }} className="text-center">
           <h1 className="text-3xl md:text-4xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-primary via-white to-accent uppercase mb-2">
             Voice Investigation
           </h1>
           <p className="font-mono text-sm text-muted-foreground max-w-sm">
-            {subtitleText[voiceState]}
+            {SUBTITLE[voiceState]}
           </p>
         </motion.div>
 
-        {/* ── Debug State Banner ── */}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-border/30 bg-card/30 font-mono text-[10px] tracking-widest text-muted-foreground/60">
-          <span className={cn("w-1.5 h-1.5 rounded-full", statusDot)} />
-          STATE: {voiceState.toUpperCase()}
-          {errorMsg && (
-            <span className="text-red-400 ml-2 max-w-[200px] truncate">| {errorMsg}</span>
-          )}
-        </div>
-
-        {/* Mic orb */}
+        {/* ── Mic Orb ── */}
         <div className="relative flex items-center justify-center">
-          {/* Pulse rings */}
           {isActive && (
             <>
               <span className="absolute w-40 h-40 rounded-full border border-primary/20 animate-ping" style={{ animationDuration: "2s" }} />
@@ -459,76 +560,160 @@ export default function Voice() {
             </>
           )}
           {isConnecting && (
-            <span className="absolute w-40 h-40 rounded-full border border-yellow-400/20 animate-ping" style={{ animationDuration: "1.5s" }} />
+            <span className="absolute w-44 h-44 rounded-full border border-yellow-400/20 animate-ping" style={{ animationDuration: "1.4s" }} />
           )}
 
-          <motion.button
-            type="button"
-            whileHover={{ scale: !isConnecting ? 1.05 : 1 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={isActive ? stopSession : isConnecting ? undefined : startSession}
-            disabled={isConnecting}
-            aria-label={isActive ? "Stop voice session" : "Start voice session"}
+          <div
             className={cn(
-              "relative w-32 h-32 rounded-full flex items-center justify-center transition-all duration-500 shadow-2xl border-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-              voiceState === "idle"
-                ? "bg-primary/20 border-primary/50 hover:bg-primary/30 hover:border-primary cursor-pointer"
-                : isConnecting
-                ? "bg-yellow-500/20 border-yellow-500/50 cursor-wait"
-                : voiceState === "listening"
-                ? "bg-primary/30 border-primary cursor-pointer"
-                : voiceState === "speaking"
-                ? "bg-accent/20 border-accent/60 cursor-pointer"
-                : voiceState === "error"
-                ? "bg-red-500/20 border-red-500/50 cursor-pointer"
-                : "bg-primary/20 border-primary/50 cursor-pointer"
+              "w-28 h-28 rounded-full flex items-center justify-center border-2 shadow-2xl transition-all duration-500",
+              isActive     ? "bg-primary/30 border-primary" :
+              isConnecting ? "bg-yellow-500/20 border-yellow-500/50" :
+              isError      ? "bg-red-500/20 border-red-500/40" :
+              voiceState === "mic_ready" ? "bg-emerald-500/20 border-emerald-500/40" :
+              "bg-primary/15 border-primary/40"
             )}
           >
-            {/* Icon */}
             {isConnecting ? (
-              <Activity className="w-10 h-10 text-yellow-400 animate-spin" />
+              <Activity className="w-9 h-9 text-yellow-400 animate-spin" />
             ) : voiceState === "speaking" ? (
-              <Volume2 className="w-10 h-10 text-accent animate-pulse" />
+              <Volume2 className="w-9 h-9 text-primary animate-pulse" />
+            ) : voiceState === "processing" ? (
+              <Activity className="w-9 h-9 text-primary animate-spin" />
+            ) : voiceState === "mic_ready" ? (
+              <CheckCircle2 className="w-9 h-9 text-emerald-400" />
+            ) : isError ? (
+              <AlertTriangle className="w-9 h-9 text-red-400" />
             ) : voiceState === "listening" ? (
-              <Mic className="w-10 h-10 text-primary animate-pulse" />
-            ) : voiceState === "error" ? (
-              <AlertTriangle className="w-10 h-10 text-red-400" />
+              <Mic className="w-9 h-9 text-primary animate-pulse" />
             ) : (
-              <Mic className="w-10 h-10 text-primary/70" />
+              <Mic className="w-9 h-9 text-primary/60" />
             )}
 
-            {/* Waveform bars (listening) */}
             {voiceState === "listening" && (
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-0.5 items-end h-4">
+              <div className="absolute bottom-3.5 left-1/2 -translate-x-1/2 flex gap-0.5 items-end h-3">
                 {[...Array(5)].map((_, i) => (
                   <motion.span
                     key={i}
-                    className="w-1 bg-primary rounded-full"
-                    animate={{ height: ["4px", "16px", "4px"] }}
+                    className="w-0.5 bg-primary rounded-full"
+                    animate={{ height: ["3px", "12px", "3px"] }}
                     transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.1 }}
                   />
                 ))}
               </div>
             )}
-          </motion.button>
+          </div>
         </div>
 
-        {/* Tap hint */}
-        <p className="font-mono text-xs text-muted-foreground/50 text-center">
-          {voiceState === "idle"  && "Tap to start voice session"}
-          {isActive              && "Tap to end session"}
-          {isConnecting          && "Please wait..."}
-          {voiceState === "error" && "Tap the mic to try again"}
-        </p>
+        {/* ── Control Buttons ── */}
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          {/* Mic test */}
+          {(voiceState === "idle" || voiceState === "error" || voiceState === "mic_ready") && (
+            <button
+              type="button"
+              onClick={handleMicTest}
+              disabled={isConnecting}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border/50 bg-card/40 font-mono text-xs text-muted-foreground hover:text-foreground hover:border-border transition-all disabled:opacity-40"
+            >
+              <FlaskConical className="w-3.5 h-3.5" />
+              Test Microphone
+            </button>
+          )}
 
-        {/* Error card */}
+          {/* Bypass toggle */}
+          {(voiceState === "idle" || voiceState === "error" || voiceState === "mic_ready") && (
+            <button
+              type="button"
+              onClick={() => {
+                setBypassMode((v) => !v);
+                log("Bypass mode toggled", !bypassMode);
+              }}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-xl border font-mono text-xs transition-all",
+                bypassMode
+                  ? "border-accent/60 bg-accent/10 text-accent"
+                  : "border-border/50 bg-card/40 text-muted-foreground hover:text-foreground hover:border-border"
+              )}
+            >
+              <Radio className="w-3.5 h-3.5" />
+              {bypassMode ? "Bypass: ON" : "Bypass ElevenLabs"}
+            </button>
+          )}
+
+          {/* Start / Stop */}
+          {isActive ? (
+            <button
+              type="button"
+              onClick={handleStop}
+              className="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-red-500/50 bg-red-500/10 font-mono text-sm text-red-400 hover:bg-red-500/20 transition-all"
+            >
+              <Mic className="w-4 h-4" />
+              End Session
+            </button>
+          ) : !isConnecting ? (
+            <button
+              type="button"
+              onClick={handleStartSession}
+              disabled={isConnecting}
+              className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-mono text-sm font-bold shadow-[0_0_20px_rgba(0,255,255,0.2)] hover:shadow-[0_0_28px_rgba(0,255,255,0.35)] transition-all disabled:opacity-40"
+            >
+              <Mic className="w-4 h-4" />
+              {bypassMode ? "Start (No ElevenLabs)" : "Start Voice"}
+            </button>
+          ) : null}
+
+          {/* Cancel while connecting */}
+          {isConnecting && (
+            <button
+              type="button"
+              onClick={handleStop}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border/50 bg-card/40 font-mono text-xs text-muted-foreground hover:text-foreground transition-all"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+
+        {/* ── Debug Panel ── */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="w-full max-w-lg rounded-xl border border-border/30 bg-card/30 p-4 font-mono text-[11px] space-y-1.5"
+        >
+          <p className="text-muted-foreground/40 tracking-widest uppercase text-[10px] mb-2">
+            Debug Panel
+          </p>
+
+          <DebugRow label="Secure Context" value={isSecureContext} bool />
+          <DebugRow label="mediaDevices API" value={hasMediaDevices} bool />
+          <DebugRow label="Current State"   value={voiceState} mono />
+          <DebugRow label="Session Live"    value={sessionLiveRef.current} bool />
+          <DebugRow label="Bypass Mode"     value={bypassMode} bool />
+          <DebugRow label="Mic Stream"
+            value={micStreamRef.current ? "active" : "none"}
+            color={micStreamRef.current ? "text-emerald-400" : "text-muted-foreground/50"}
+          />
+          {micTestResult && (
+            <DebugRow label="Mic Test"
+              value={micTestResult}
+              color={micTestResult.startsWith("GRANTED") ? "text-emerald-400" : "text-red-400"}
+            />
+          )}
+          {errorMsg && (
+            <div className="pt-1.5 border-t border-border/20">
+              <span className="text-muted-foreground/40">Last Error: </span>
+              <span className="text-red-400 break-words">{errorMsg}</span>
+            </div>
+          )}
+        </motion.div>
+
+        {/* ── Error Card ── */}
         <AnimatePresence>
           {isError && errorMsg && (
             <motion.div
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
-              className="bg-red-500/10 border border-red-500/40 rounded-xl px-5 py-4 text-sm font-mono text-red-400 max-w-sm text-center leading-relaxed"
+              className="w-full max-w-sm bg-red-500/10 border border-red-500/40 rounded-xl px-5 py-4 font-mono text-sm text-red-400 text-center leading-relaxed"
             >
               <AlertTriangle className="w-4 h-4 mx-auto mb-2 opacity-70" />
               {errorMsg}
@@ -536,7 +721,7 @@ export default function Voice() {
           )}
         </AnimatePresence>
 
-        {/* Transcript */}
+        {/* ── Transcript ── */}
         <AnimatePresence>
           {messages.length > 0 && (
             <motion.div
@@ -544,13 +729,13 @@ export default function Voice() {
               animate={{ opacity: 1, y: 0 }}
               className="w-full max-w-xl space-y-2"
             >
-              <p className="font-mono text-xs text-muted-foreground/40 tracking-widest uppercase mb-3">
+              <p className="font-mono text-[10px] text-muted-foreground/40 tracking-widest uppercase mb-2">
                 Transcript
               </p>
               {messages.map((m, i) => (
                 <motion.div
                   key={i}
-                  initial={{ opacity: 0, x: m.role === "agent" ? -10 : 10 }}
+                  initial={{ opacity: 0, x: m.role === "agent" ? -8 : 8 }}
                   animate={{ opacity: 1, x: 0 }}
                   className={cn(
                     "px-4 py-2.5 rounded-xl text-sm font-mono leading-relaxed",
@@ -571,9 +756,48 @@ export default function Voice() {
 
       </main>
 
-      <footer className="relative z-10 text-center pb-6 font-mono text-[10px] text-muted-foreground/30">
+      <footer className="relative z-10 text-center pb-6 font-mono text-[10px] text-muted-foreground/25">
         Assessment based on available public web evidence · Not financial advice
       </footer>
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// DebugRow helper
+// ---------------------------------------------------------------------------
+
+interface DebugRowProps {
+  label: string;
+  value: boolean | string;
+  bool?: boolean;
+  mono?: boolean;
+  color?: string;
+}
+
+function DebugRow({ label, value, bool, mono, color }: DebugRowProps) {
+  let display: React.ReactNode;
+  let cls = color ?? "text-foreground/70";
+
+  if (bool && typeof value === "boolean") {
+    display = value ? (
+      <span className="flex items-center gap-1 text-emerald-400">
+        <Wifi className="w-3 h-3" /> yes
+      </span>
+    ) : (
+      <span className="flex items-center gap-1 text-red-400">
+        <WifiOff className="w-3 h-3" /> no
+      </span>
+    );
+  } else {
+    display = <span className={cn(mono ? "text-primary" : cls)}>{String(value)}</span>;
+  }
+
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <span className="text-muted-foreground/50 shrink-0">{label}</span>
+      <span className="text-right">{display}</span>
+    </div>
+  );
+}
+
